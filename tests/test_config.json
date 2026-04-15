@@ -1,0 +1,204 @@
+{
+  "source_table": "primary_catalog.main_test.accounts_all",
+  "partition_column": "rpt_as_of_mo",
+  "destination_table": "primary_catalog.main_test.summary",
+  "latest_history_table": "primary_catalog.main_test.latest_summary",
+  "primary_column": "cons_acct_key",
+  "primary_date_column": "acct_dt",
+  "max_identifier_column": "base_ts",
+  "history_length": 36,
+  "columns": {
+    "cons_acct_key": "cons_acct_key",
+    "bureau_mbr_id": "bureau_member_id",
+    "port_type_cd": "portfolio_rating_type_cd",
+    "acct_type_dtl_cd": "acct_type_dtl_cd",
+    "acct_open_dt": "open_dt",
+    "acct_closed_dt": "closed_dt",
+    "pymt_terms_cd": "pymt_terms_cd",
+    "pymt_terms_dtl_cd": "pymt_terms_dtl_cd",
+    "acct_dt": "acct_dt",
+    "acct_stat_cd": "acct_stat_cd",
+    "acct_pymt_stat_cd": "acct_pymt_stat_cd",
+    "acct_pymt_stat_dtl_cd": "acct_pymt_stat_dtl_cd",
+    "acct_credit_ext_am": "credit_limit_am",
+    "acct_bal_am": "balance_am",
+    "past_due_am": "past_due_am",
+    "actual_pymt_am": "actual_payment_am",
+    "last_pymt_dt": "last_payment_dt",
+    "schd_pymt_dt": "schd_pymt_dt",
+    "next_schd_pymt_am": "emi_amt",
+    "collateral_cd": "collateral_cd",
+    "orig_pymt_due_dt": "orig_pymt_due_dt",
+    "write_off_dt": "dflt_status_dt",
+    "write_off_am": "write_off_am",
+    "asset_class_cd_4in": "asset_class_cd",
+    "days_past_due_ct_4in": "days_past_due",
+    "high_credit_am_4in": "hi_credit_am",
+    "cash_limit_am_4in": "cash_limit_am",
+    "collateral_am_4in": "collateral_am",
+    "total_write_off_am_4in": "charge_off_am",
+    "principal_write_off_am_4in": "principal_write_off_am",
+    "settled_am_4in": "settled_am",
+    "interest_rate_4in": "interest_rate",
+    "suit_filed_wilful_def_stat_cd_4in": "suit_filed_willful_dflt",
+    "wo_settled_stat_cd_4in": "written_off_and_settled_status",
+    "base_ts": "base_ts",
+    "rpt_as_of_mo": "rpt_as_of_mo"
+  },
+  "column_transformations": [
+    {
+      "name": "acct_type_dtl_cd",
+      "mapper_expr": "CASE WHEN acct_type_dtl_cd = '' OR acct_type_dtl_cd IS NULL THEN 999 ELSE acct_type_dtl_cd END"
+    },
+    {
+      "name": "charge_off_am",
+      "mapper_expr": "CASE WHEN charge_off_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE charge_off_am END"
+    },
+    {
+      "name": "credit_limit_am",
+      "mapper_expr": "CASE WHEN credit_limit_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE credit_limit_am END"
+    },
+    {
+      "name": "emi_amt",
+      "mapper_expr": "CASE WHEN emi_amt IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE emi_amt END"
+    },
+    {
+      "name": "balance_am",
+      "mapper_expr": "CASE WHEN balance_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE balance_am END"
+    },
+    {
+      "name": "actual_payment_am",
+      "mapper_expr": "CASE WHEN actual_payment_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE actual_payment_am END"
+    },
+    {
+      "name": "past_due_am",
+      "mapper_expr": "CASE WHEN past_due_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE past_due_am END"
+    }
+  ],
+  "inferred_columns": [
+    {
+      "name": "orig_loan_am",
+      "mapper_expr": "CASE WHEN acct_type_dtl_cd IN ('5', '214', '220', '213', '224') THEN hi_credit_am ELSE credit_limit_am END"
+    },
+    {
+      "name": "payment_rating_cd",
+      "mapper_expr": "CASE WHEN days_past_due <= -1 THEN CASE WHEN asset_class_cd IN ('1', '01', 'S') THEN 'S' WHEN asset_class_cd IN ('2', '02', 'B') THEN 'B' WHEN asset_class_cd IN ('3', '03', 'D') THEN 'D' WHEN asset_class_cd IN ('4', '04', 'D') THEN 'L' WHEN asset_class_cd IN ('5', '05', 'M') THEN 'M' WHEN asset_class_cd IN ('0', '1', '2', '3', '4', '5', '6', 'G', 'L', 'C') THEN asset_class_cd ELSE NULL END WHEN days_past_due >= 0 THEN CASE WHEN days_past_due >= 0 AND days_past_due <= 29 THEN '0' WHEN days_past_due >= 30 AND days_past_due <= 59 THEN '1' WHEN days_past_due >= 60 AND days_past_due <= 89 THEN '2' WHEN days_past_due >= 90 AND days_past_due <= 119 THEN '3' WHEN days_past_due >= 120 AND days_past_due <= 149 THEN '4' WHEN days_past_due >= 150 AND days_past_due <= 179 THEN '5' WHEN days_past_due >= 180 THEN '6' ELSE NULL END END"
+    }
+  ],
+  "coalesce_exclusion_cols": [
+    "acct_dt",
+    "rpt_as_of_mo"
+  ],
+  "date_col_list": [
+    "open_dt",
+    "closed_dt",
+    "acct_dt",
+    "last_payment_dt",
+    "schd_pymt_dt",
+    "orig_pymt_due_dt",
+    "dflt_status_dt"
+  ],
+  "latest_history_addon_cols": [
+    "emi_amt",
+    "bureau_member_id",
+    "open_dt",
+    "acct_pymt_stat_cd",
+    "acct_type_dtl_cd",
+    "acct_stat_cd",
+    "pymt_terms_cd",
+    "balance_am",
+    "closed_dt",
+    "dflt_status_dt",
+    "last_payment_dt",
+    "asset_class_cd",
+    "days_past_due",
+    "past_due_am",
+    "charge_off_am",
+    "suit_filed_willful_dflt",
+    "written_off_and_settled_status",
+    "portfolio_rating_type_cd",
+    "actual_payment_am",
+    "credit_limit_am",
+    "interest_rate",
+    "orig_loan_am",
+    "payment_history_grid"
+  ],
+  "rolling_columns": [
+    {
+      "name": "actual_payment_am",
+      "mapper_expr": "CASE WHEN actual_payment_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE actual_payment_am END",
+      "mapper_column": "actual_payment_am",
+      "num_cols": 36,
+      "type": "Integer"
+    },
+    {
+      "name": "balance_am",
+      "mapper_expr": "CASE WHEN balance_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE balance_am END",
+      "mapper_column": "balance_am",
+      "num_cols": 36,
+      "type": "Integer"
+    },
+    {
+      "name": "credit_limit_am",
+      "mapper_expr": "credit_limit_am",
+      "mapper_column": "credit_limit_am",
+      "num_cols": 36,
+      "type": "Integer"
+    },
+    {
+      "name": "past_due_am",
+      "mapper_expr": "CASE WHEN past_due_am IN (-2147483647, -214748364, -21474836, -1) THEN NULL ELSE past_due_am END",
+      "mapper_column": "past_due_am",
+      "num_cols": 36,
+      "type": "Integer"
+    },
+    {
+      "name": "payment_rating_cd",
+      "mapper_expr": "CASE WHEN days_past_due <= -1 THEN CASE WHEN ASSET_CLASS_CD IN ('1', '01', 'S') THEN 'S' WHEN ASSET_CLASS_CD IN ('2', '02', 'B') THEN 'B' WHEN ASSET_CLASS_CD IN ('3', '03', 'D') THEN 'D' WHEN ASSET_CLASS_CD IN ('4', '04', 'D') THEN 'L' WHEN ASSET_CLASS_CD IN ('5', '05', 'M') THEN 'M' WHEN ASSET_CLASS_CD IN ('0', '1', '2', '3', '4', '5', '6', 'G', 'L', 'C') THEN ASSET_CLASS_CD ELSE NULL END WHEN days_past_due >= 0 THEN CASE WHEN days_past_due >= 0 AND days_past_due <= 29 THEN '0' WHEN days_past_due >= 30 AND days_past_due <= 59 THEN '1' WHEN days_past_due >= 60 AND days_past_due <= 89 THEN '2' WHEN days_past_due >= 90 AND days_past_due <= 119 THEN '3' WHEN days_past_due >= 120 AND days_past_due <= 149 THEN '4' WHEN days_past_due >= 150 AND days_past_due <= 179 THEN '5' WHEN days_past_due >= 180 THEN '6' ELSE NULL END END",
+      "mapper_column": "payment_rating_cd",
+      "num_cols": 36,
+      "type": "String"
+    },
+    {
+      "name": "days_past_due",
+      "mapper_expr": "days_past_due",
+      "mapper_column": "days_past_due",
+      "num_cols": 36,
+      "type": "Integer"
+    },
+    {
+      "name": "asset_class_cd_4in",
+      "mapper_expr": "asset_class_cd",
+      "mapper_column": "asset_class_cd",
+      "num_cols": 36,
+      "type": "String"
+    }
+  ],
+  "grid_columns": [
+    {
+      "name": "payment_history_grid",
+      "mapper_rolling_column": "payment_rating_cd",
+      "placeholder": "?",
+      "seperator": ""
+    }
+  ],
+  "spark": {
+    "spark.sql.catalog.temp_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+    "spark.sql.shuffle.partitions": "32",
+    "spark.sql.catalog.primary_catalog.warehouse": "s3://warehouse/",
+    "spark.sql.catalog.primary_catalog": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.sql.catalog.temp_catalog.s3.endpoint": "http://minio:9000",
+    "spark.sql.catalog.primary_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+    "spark.sql.catalog.primary_catalog.s3.endpoint": "http://minio:9000",
+    "spark.sql.defaultCatalog": "primary_catalog",
+    "spark.sql.catalog.temp_catalog.uri": "http://rest:8181",
+    "spark.sql.catalog.temp_catalog.type": "rest",
+    "spark.sql.catalog.primary_catalog.uri": "http://rest:8181",
+    "spark.sql.catalog.temp_catalog": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.default.parallelism": "32",
+    "spark.sql.catalog.temp_catalog.warehouse": "s3://warehouse/",
+    "spark.sql.catalog.primary_catalog.type": "rest",
+    "app_name": "MainDockerTestConfig"
+  }
+}

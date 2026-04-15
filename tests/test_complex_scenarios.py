@@ -1,0 +1,10 @@
+"""
+Auto-generated docker test entry for main pipeline.
+Equivalent coverage target for: test_complex_scenarios.py
+"""
+
+from tests.scenario_suite import run_all_scenarios_test
+
+
+if __name__ == "__main__":
+    run_all_scenarios_test()
