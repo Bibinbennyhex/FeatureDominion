@@ -13,7 +13,10 @@ from pathlib import Path
 from pyspark.sql import functions as F
 
 import test_utils
-import backfill_soft_delete_from_accounts as backfill_job
+try:
+    import backfill_soft_delete_from_accounts as backfill_job
+except ModuleNotFoundError:
+    backfill_job = None
 try:
     from tests.suite_manifest import get_v4_tier_tests, validate_v4_unique_suite
 except ModuleNotFoundError:
@@ -84,7 +87,9 @@ def _snapshot_pair(spark, config):
 
 
 ORIG_RUN_PIPELINE = test_utils.main_pipeline.run_pipeline
-ORIG_BACKFILL_MERGE = backfill_job._merge_case_tables_chunked
+ORIG_BACKFILL_MERGE = (
+    backfill_job._merge_case_tables_chunked if backfill_job is not None else None
+)
 
 
 def _wrapped_run_pipeline(spark, config, *args, **kwargs):
@@ -112,6 +117,8 @@ def _wrapped_run_pipeline(spark, config, *args, **kwargs):
 
 
 def _wrapped_backfill_merge_case_tables_chunked(spark, history_cols, grid_specs, *args, **kwargs):
+    if backfill_job is None or ORIG_BACKFILL_MERGE is None:
+        raise RuntimeError("backfill_soft_delete_from_accounts module is unavailable in regression_suite")
     test_name = CURRENT_TEST["name"] or "UNKNOWN_TEST"
     cfg = {
         "destination_table": backfill_job.SUMMARY_TABLE,
@@ -185,7 +192,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     test_utils.main_pipeline.run_pipeline = _wrapped_run_pipeline
-    backfill_job._merge_case_tables_chunked = _wrapped_backfill_merge_case_tables_chunked
+    if backfill_job is not None and ORIG_BACKFILL_MERGE is not None:
+        backfill_job._merge_case_tables_chunked = _wrapped_backfill_merge_case_tables_chunked
     try:
         for test_file in TEST_FILES:
             CURRENT_TEST["name"] = test_file
@@ -206,7 +214,8 @@ def main():
             print(f"[AUDIT] {test_file} -> {status}")
     finally:
         test_utils.main_pipeline.run_pipeline = ORIG_RUN_PIPELINE
-        backfill_job._merge_case_tables_chunked = ORIG_BACKFILL_MERGE
+        if backfill_job is not None and ORIG_BACKFILL_MERGE is not None:
+            backfill_job._merge_case_tables_chunked = ORIG_BACKFILL_MERGE
 
     payload = {
         "generated_utc": datetime.now(timezone.utc).isoformat(),

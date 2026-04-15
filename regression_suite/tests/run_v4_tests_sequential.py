@@ -26,7 +26,7 @@ def main() -> int:
         default=DEFAULT_PIPELINE_SCRIPT,
         help=(
             "Pipeline script selector for all tests. "
-            "Examples: summary_inc_v4.py, summary_inc_v4.1.py, or repo/absolute path."
+            "Examples: summary_inc_v4.py, summary_inc_v4.py, or repo/absolute path."
         ),
     )
     parser.add_argument(
@@ -114,3 +114,4 @@ def main() -> int:
 
 if __name__ == '__main__':
     raise SystemExit(main())
+

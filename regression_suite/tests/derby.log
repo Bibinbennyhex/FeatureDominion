@@ -1,0 +1,13 @@
+----------------------------------------------------------------
+Wed Apr 15 13:38:09 UTC 2026:
+Booting Derby version The Apache Software Foundation - Apache Derby - 10.14.2.0 - (1828579): instance a816c00e-019d-915d-1349-000012858620 
+on database directory /workspace/Feature _Deployment/regression_suite/tests/metastore_db with class loader jdk.internal.loader.ClassLoaders$AppClassLoader@5ffd2b27 
+Loaded from file:/opt/spark/jars/derby-10.14.2.0.jar
+java.vendor=Debian
+java.runtime.version=17.0.14+7-Debian-1deb11u1
+user.dir=/workspace/Feature _Deployment/regression_suite/tests
+os.name=Linux
+os.arch=amd64
+os.version=6.6.87.2-microsoft-standard-WSL2
+derby.system.home=null
+Database Class Loader started - derby.database.classpath=''

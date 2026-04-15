@@ -1,5 +1,5 @@
 """
-Comprehensive Case III test suite for summary_inc_v4.1.py
+Comprehensive Case III test suite for summary_inc_v4.py
 
 Covers 13 distinct backfill scenarios:
   1.  Single Hot Update — only latest month exists in summary
@@ -242,10 +242,10 @@ _TU = None
 def _init(test_name: str) -> None:
     global _SPARK, _MODULE, _CONFIG, _TU
 
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = Path(__file__).resolve().parents[2]
     module = load_v4_as_summary_inc("_summary_inc_v4_comprehensive")
 
-    tests_dir = repo_root / "main" / "docker_test" / "tests"
+    tests_dir = Path(__file__).resolve().parent
     if str(tests_dir) not in sys.path:
         sys.path.insert(0, str(tests_dir))
 
@@ -328,12 +328,21 @@ def _run_case3(
         )
     # -----------------------------------------------------------------------
 
-    # module.materialize_working_set_context_tables(spark, classified, config)
+    module.materialize_working_set_context_tables(spark, classified, config)
 
     case_iii_all = classified.filter(F.col("case_type") == "CASE_III")
-    count_iii = case_iii_all.count()
-    if count_iii > 0:
-        module.categorize_updates(spark, case_iii_all, config, expected_rows=count_iii)
+    case_iii_normal = case_iii_all.filter(~F.col("_is_soft_delete"))
+    case_iii_delete = case_iii_all.filter(F.col("_is_soft_delete"))
+
+    normal_count = case_iii_normal.count()
+    delete_count = case_iii_delete.count()
+
+    if normal_count > 0:
+        module.process_case_iii(spark, case_iii_normal, config, expected_rows=normal_count)
+    if delete_count > 0:
+        module.process_case_iii_soft_delete(spark, case_iii_delete, config, expected_rows=delete_count)
+
+    if normal_count + delete_count > 0:
         module.write_backfill_results(spark, config)
 
 
@@ -914,3 +923,5 @@ def run_all_tests():
 
 if __name__ == "__main__":
     run_all_tests()
+
+

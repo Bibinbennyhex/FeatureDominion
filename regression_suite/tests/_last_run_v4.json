@@ -1,0 +1,79 @@
+{
+  "run_id": "20260415T114001Z",
+  "tier": "smoke",
+  "generated_utc": "2026-04-15T12:02:20.708396+00:00",
+  "log_root": "/workspace/Feature _Deployment/regression_suite/tests/artifacts/logs_v4/run_20260415T114001Z",
+  "audit_root": "/workspace/Feature _Deployment/regression_suite/tests/artifacts/audits/run_20260415T114001Z",
+  "results": [
+    {
+      "test": "test_v4_module_smoke.py",
+      "status": "PASS",
+      "duration_sec": 1.56,
+      "exit_code": 0,
+      "log": "test_v4_module_smoke.py.log"
+    },
+    {
+      "test": "test_v4_config_contract.py",
+      "status": "PASS",
+      "duration_sec": 1.14,
+      "exit_code": 0,
+      "log": "test_v4_config_contract.py.log"
+    },
+    {
+      "test": "test_v4_case_end_to_end_smoke.py",
+      "status": "PASS",
+      "duration_sec": 267.86,
+      "exit_code": 0,
+      "log": "test_v4_case_end_to_end_smoke.py.log"
+    },
+    {
+      "test": "test_v4_summary36_latest72_window_update.py",
+      "status": "PASS",
+      "duration_sec": 122.17,
+      "exit_code": 0,
+      "log": "test_v4_summary36_latest72_window_update.py.log"
+    },
+    {
+      "test": "test_v4_latest_summary_consistency.py",
+      "status": "PASS",
+      "duration_sec": 137.44,
+      "exit_code": 0,
+      "log": "test_v4_latest_summary_consistency.py.log"
+    },
+    {
+      "test": "test_v4_case3_current_max_month.py",
+      "status": "PASS",
+      "duration_sec": 158.75,
+      "exit_code": 0,
+      "log": "test_v4_case3_current_max_month.py.log"
+    },
+    {
+      "test": "test_v4_case3_current_max_month_soft_delete.py",
+      "status": "PASS",
+      "duration_sec": 205.7,
+      "exit_code": 0,
+      "log": "test_v4_case3_current_max_month_soft_delete.py.log"
+    },
+    {
+      "test": "test_v4_case3_hot_and_cold_split.py",
+      "status": "PASS",
+      "duration_sec": 112.22,
+      "exit_code": 0,
+      "log": "test_v4_case3_hot_and_cold_split.py.log"
+    },
+    {
+      "test": "test_v4_case3_soft_delete_hot_cold_split.py",
+      "status": "PASS",
+      "duration_sec": 273.17,
+      "exit_code": 0,
+      "log": "test_v4_case3_soft_delete_hot_cold_split.py.log"
+    },
+    {
+      "test": "test_v4_working_set_scope_mixed_cases.py",
+      "status": "PASS",
+      "duration_sec": 58.79,
+      "exit_code": 0,
+      "log": "test_v4_working_set_scope_mixed_cases.py.log"
+    }
+  ]
+}
