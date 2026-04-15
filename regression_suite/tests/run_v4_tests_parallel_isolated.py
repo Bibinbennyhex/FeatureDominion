@@ -55,7 +55,7 @@ def _build_assignments(tests: list[str], run_token: str) -> list[dict]:
                 "idx": idx,
                 "test": test_name,
                 "namespace": f"v4p_{run_token}_{idx:03d}_{safe_token}"[:120],
-                "temp_catalog_warehouse": f"file:///tmp/v4_parallel/{run_token}/{idx:03d}_{safe_token}/",
+                "execution_catalog_warehouse": f"file:///tmp/v4_parallel/{run_token}/{idx:03d}_{safe_token}/",
             }
         )
     return assignments
@@ -97,13 +97,13 @@ def _precreate_tables(assignments: list[dict]) -> None:
     try:
         for item in assignments:
             os.environ["TEST_NAMESPACE_OVERRIDE"] = item["namespace"]
-            os.environ["TEST_TEMP_CATALOG_WAREHOUSE"] = item["temp_catalog_warehouse"]
+            os.environ["TEST_execution_catalog_WAREHOUSE"] = item["execution_catalog_warehouse"]
             config = docker_test_utils.load_main_test_config(item["namespace"])
             docker_test_utils.precreate_tables(spark, config)
             print(f"[precreate] tables={item['namespace']}", flush=True)
     finally:
         os.environ.pop("TEST_NAMESPACE_OVERRIDE", None)
-        os.environ.pop("TEST_TEMP_CATALOG_WAREHOUSE", None)
+        os.environ.pop("TEST_execution_catalog_WAREHOUSE", None)
         spark.stop()
 
 
@@ -116,13 +116,13 @@ def _run_one(
     idx = assignment["idx"]
     test_name = assignment["test"]
     namespace = assignment["namespace"]
-    temp_wh = assignment["temp_catalog_warehouse"]
+    temp_wh = assignment["execution_catalog_warehouse"]
     log_path = run_dir / f"{test_name}.log"
     cmd = [sys.executable, str(tests_dir / test_name)]
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
     env["TEST_NAMESPACE_OVERRIDE"] = namespace
-    env["TEST_TEMP_CATALOG_WAREHOUSE"] = temp_wh
+    env["TEST_execution_catalog_WAREHOUSE"] = temp_wh
     env["TEST_USE_PRECREATED_TABLES"] = "1"
     env["TEST_PRECREATED_ASSUME_EMPTY"] = "1"
 
@@ -130,7 +130,7 @@ def _run_one(
     with log_path.open("w", encoding="utf-8", newline="\n") as lf:
         lf.write(f"[isolation] test={test_name}\n")
         lf.write(f"[isolation] namespace={namespace}\n")
-        lf.write(f"[isolation] temp_catalog_warehouse={temp_wh}\n")
+        lf.write(f"[isolation] execution_catalog_warehouse={temp_wh}\n")
         lf.flush()
         proc = subprocess.Popen(cmd, cwd=str(tests_dir), stdout=lf, stderr=subprocess.STDOUT, env=env)
         rc = proc.wait()
@@ -144,7 +144,7 @@ def _run_one(
         "exit_code": rc,
         "log": log_path.name,
         "namespace": namespace,
-        "temp_catalog_warehouse": temp_wh,
+        "execution_catalog_warehouse": temp_wh,
     }
 
 

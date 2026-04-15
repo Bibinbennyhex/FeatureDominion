@@ -2,8 +2,6 @@ from datetime import datetime
 from pathlib import Path
 import sys
 
-from pyspark.sql import functions as F
-
 from tests.v4_contract_utils import load_v4_as_summary_inc, pad_latest_rows
 
 
@@ -27,15 +25,12 @@ def test_v4_working_set_scope_mixed_cases():
     config["history_length"] = 36
     config["latest_history_window_months"] = 72
     config["validate_latest_history_window"] = True
-    config["use_working_set_latest_context"] = True
-    config["use_working_set_case3_summary_context"] = True
-
-    workset_latest_table = "temp_catalog.checkpointdb.workset_latest_summary"
-    workset_case3_table = "temp_catalog.checkpointdb.workset_summary_case3"
 
     try:
         module.cleanup(spark)
         tu.reset_tables(spark, config)
+        spark.sql("DROP TABLE IF EXISTS execution_catalog.checkpointdb.workset_latest_summary")
+        spark.sql("DROP TABLE IF EXISTS execution_catalog.checkpointdb.workset_summary_case3")
 
         existing_ts = datetime(2026, 1, 1, 0, 0, 0)
         source_ts = datetime(2026, 2, 1, 12, 0, 0)
@@ -61,45 +56,35 @@ def test_v4_working_set_scope_mixed_cases():
         tu.write_summary_rows(spark, config["latest_history_table"], pad_latest_rows(latest_rows))
 
         source_rows = [
-            # CASE I
             tu.build_source_row(acct_case1, "2026-11", source_ts, balance=4100, actual_payment=410),
-            # CASE II
             tu.build_source_row(acct_case2, "2026-11", source_ts, balance=5150, actual_payment=515),
-            # CASE III
             tu.build_source_row(acct_case3, "2025-12", source_ts, balance=6250, actual_payment=625),
-            # CASE IV (new account with multi-month batch)
             tu.build_source_row(acct_case4, "2026-09", source_ts, balance=7100, actual_payment=710),
             tu.build_source_row(acct_case4, "2026-10", source_ts, balance=7200, actual_payment=720),
         ]
         tu.write_source_rows(spark, config["source_table"], source_rows)
 
-        module.ensure_soft_delete_columns(spark, config)
-        module.preload_run_table_columns(spark, config)
-        classified = module.load_and_classify_accounts(spark, config)
-        module.materialize_working_set_context_tables(spark, classified, config)
+        module.run_pipeline(spark, config)
 
-        _assert_true(spark.catalog.tableExists(workset_latest_table), "workset_latest_summary not created")
-        _assert_true(spark.catalog.tableExists(workset_case3_table), "workset_summary_case3 not created")
+        _assert_true(int(tu.fetch_single_row(spark, config["destination_table"], acct_case1, "2026-11")["balance_am"]) == 4100, "CASE I row missing or incorrect")
+        _assert_true(int(tu.fetch_single_row(spark, config["destination_table"], acct_case2, "2026-11")["balance_am"]) == 5150, "CASE II row missing or incorrect")
+        _assert_true(int(tu.fetch_single_row(spark, config["destination_table"], acct_case3, "2025-12")["balance_am"]) == 6250, "CASE III backfill row missing or incorrect")
+        _assert_true(int(tu.fetch_single_row(spark, config["destination_table"], acct_case4, "2026-09")["balance_am"]) == 7100, "CASE IV base row missing or incorrect")
+        _assert_true(int(tu.fetch_single_row(spark, config["destination_table"], acct_case4, "2026-10")["balance_am"]) == 7200, "CASE IV historical row missing or incorrect")
 
-        classified_keys = {
-            int(r["cons_acct_key"])
-            for r in classified.select("cons_acct_key").distinct().collect()
-        }
-        latest_keys = {
-            int(r["cons_acct_key"])
-            for r in spark.read.table(workset_latest_table).select("cons_acct_key").distinct().collect()
-        }
-        case3_keys = {
-            int(r["cons_acct_key"])
-            for r in classified.filter(F.col("case_type") == "CASE_III").select("cons_acct_key").distinct().collect()
-        }
-        case3_scope_keys = {
-            int(r["cons_acct_key"])
-            for r in spark.read.table(workset_case3_table).select("cons_acct_key").distinct().collect()
-        }
+        latest_case2 = spark.table(config["latest_history_table"]).where("cons_acct_key = 9502").first()
+        latest_case4 = spark.table(config["latest_history_table"]).where("cons_acct_key = 9504").first()
+        _assert_true(latest_case2 is not None and latest_case2["rpt_as_of_mo"] == "2026-11", "CASE II latest_summary month mismatch")
+        _assert_true(latest_case4 is not None and latest_case4["rpt_as_of_mo"] == "2026-10", "CASE IV latest_summary month mismatch")
 
-        _assert_true(classified_keys.issubset(latest_keys), "workset_latest_summary missing classified accounts")
-        _assert_true(case3_scope_keys == case3_keys, "workset_summary_case3 keys mismatch with CASE_III keys")
+        _assert_true(
+            not spark.catalog.tableExists("execution_catalog.checkpointdb.workset_latest_summary"),
+            "workset_latest_summary should not be created",
+        )
+        _assert_true(
+            not spark.catalog.tableExists("execution_catalog.checkpointdb.workset_summary_case3"),
+            "workset_summary_case3 should not be created",
+        )
 
         print("[PASS] test_v4_working_set_scope_mixed_cases")
     finally:
@@ -109,4 +94,3 @@ def test_v4_working_set_scope_mixed_cases():
 if __name__ == "__main__":
     test_v4_working_set_scope_mixed_cases()
     print("[PASS] test_v4_working_set_scope_mixed_cases.py")
-

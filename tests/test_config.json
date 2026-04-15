@@ -183,21 +183,21 @@
     }
   ],
   "spark": {
-    "spark.sql.catalog.temp_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+    "spark.sql.catalog.execution_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
     "spark.sql.shuffle.partitions": "32",
     "spark.sql.catalog.primary_catalog.warehouse": "s3://warehouse/",
     "spark.sql.catalog.primary_catalog": "org.apache.iceberg.spark.SparkCatalog",
-    "spark.sql.catalog.temp_catalog.s3.endpoint": "http://minio:9000",
+    "spark.sql.catalog.execution_catalog.s3.endpoint": "http://minio:9000",
     "spark.sql.catalog.primary_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
     "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
     "spark.sql.catalog.primary_catalog.s3.endpoint": "http://minio:9000",
     "spark.sql.defaultCatalog": "primary_catalog",
-    "spark.sql.catalog.temp_catalog.uri": "http://rest:8181",
-    "spark.sql.catalog.temp_catalog.type": "rest",
+    "spark.sql.catalog.execution_catalog.uri": "http://rest:8181",
+    "spark.sql.catalog.execution_catalog.type": "rest",
     "spark.sql.catalog.primary_catalog.uri": "http://rest:8181",
-    "spark.sql.catalog.temp_catalog": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.sql.catalog.execution_catalog": "org.apache.iceberg.spark.SparkCatalog",
     "spark.default.parallelism": "32",
-    "spark.sql.catalog.temp_catalog.warehouse": "s3://warehouse/",
+    "spark.sql.catalog.execution_catalog.warehouse": "s3://warehouse/",
     "spark.sql.catalog.primary_catalog.type": "rest",
     "app_name": "MainDockerTestConfig"
   }

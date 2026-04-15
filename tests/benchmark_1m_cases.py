@@ -47,13 +47,13 @@ def _reset_tables_bucketed(spark, config: Dict) -> None:
     latest_schema_spec = list(SUMMARY_SCHEMA_SPEC)
 
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS temp_catalog.checkpointdb")
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS execution_catalog.checkpointdb")
 
     for table in [source_table, summary_table, latest_table, tracker_table]:
         spark.sql(f"DROP TABLE IF EXISTS {table}")
 
     for temp_case in ["case_1", "case_2", "case_3a", "case_3b", "case_3d_month", "case_3d_future", "case_4"]:
-        spark.sql(f"DROP TABLE IF EXISTS temp_catalog.checkpointdb.{temp_case}")
+        spark.sql(f"DROP TABLE IF EXISTS execution_catalog.checkpointdb.{temp_case}")
 
     spark.sql(
         f"""

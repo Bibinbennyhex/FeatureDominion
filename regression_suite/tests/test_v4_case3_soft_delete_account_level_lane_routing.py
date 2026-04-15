@@ -96,12 +96,12 @@ def test_v4_case3_soft_delete_account_level_lane_routing():
         module.process_case_iii_soft_delete(spark, case_iii_delete_df, config, expected_rows=4)
 
         _assert_true(
-            spark.catalog.tableExists("temp_catalog.checkpointdb.case_3d_latest_history_context_patch"),
+            spark.catalog.tableExists("execution_catalog.checkpointdb.case_3d_latest_history_context_patch"),
             "Expected latest-history soft-delete patch table to exist",
         )
         history_patch_keys = _table_key_set(
             spark,
-            "temp_catalog.checkpointdb.case_3d_latest_history_context_patch",
+            "execution_catalog.checkpointdb.case_3d_latest_history_context_patch",
         )
         _assert_true(hot_acct in history_patch_keys, "Hot-only delete account should be in context patch output")
         _assert_true(cold_acct not in history_patch_keys, "Cold-only delete account should be excluded from context patch")
@@ -118,11 +118,11 @@ def test_v4_case3_soft_delete_account_level_lane_routing():
         )
         latest_month_delete_keys = (
             set()
-            if not spark.catalog.tableExists("temp_catalog.checkpointdb.case_3d_month")
+            if not spark.catalog.tableExists("execution_catalog.checkpointdb.case_3d_month")
             else {
                 int(r["cons_acct_key"])
                 for r in (
-                    spark.read.table("temp_catalog.checkpointdb.case_3d_month")
+                    spark.read.table("execution_catalog.checkpointdb.case_3d_month")
                     .filter(F.col("rpt_as_of_mo") == F.lit(latest_month))
                     .select("cons_acct_key")
                     .distinct()

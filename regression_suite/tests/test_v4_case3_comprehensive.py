@@ -286,9 +286,8 @@ def _run_case3(
       3. ensure_soft_delete_columns + preload_run_table_columns.
       4. load_and_classify_accounts.
       5. Optional count assertions on CASE_III rows (before processing).
-      6. materialize_working_set_context_tables.
-      7. categorize_updates (routes hot / cold / mixed lanes + builds temp tables).
-      8. write_backfill_results (commits to summary / latest_summary).
+      6. process_case_iii/process_case_iii_soft_delete.
+      7. write_backfill_results (commits to summary / latest_summary).
     """
     tu, spark, module, config = _TU, _SPARK, _MODULE, _CONFIG
 
@@ -327,8 +326,6 @@ def _run_case3(
             f"{label}: expected {expected_case3_deletes} soft-delete CASE_III rows, got {del_count}",
         )
     # -----------------------------------------------------------------------
-
-    module.materialize_working_set_context_tables(spark, classified, config)
 
     case_iii_all = classified.filter(F.col("case_type") == "CASE_III")
     case_iii_normal = case_iii_all.filter(~F.col("_is_soft_delete"))

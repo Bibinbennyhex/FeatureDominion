@@ -99,8 +99,8 @@
 
 ### Working-set context optimization
 - Builds scoped context tables from classified keys:
-- `temp_catalog.checkpointdb.workset_latest_summary`
-- `temp_catalog.checkpointdb.workset_summary_case3`
+- `execution_catalog.checkpointdb.workset_latest_summary`
+- `execution_catalog.checkpointdb.workset_summary_case3`
 - Reduces full-table scans during joins, especially for Case III paths.
 
 ### Tracker + rollback model
@@ -112,7 +112,7 @@
 - On exceptions after run start, best-effort rollback to captured Iceberg snapshot ids is executed for both summary and latest tables.
 
 ### Temporary/patch tables used
-- Case temp outputs and patch layers are written in `temp_catalog.checkpointdb`, including:
+- Case temp outputs and patch layers are written in `execution_catalog.checkpointdb`, including:
 - `case_1`, `case_2`, `case_3a`, `case_3b`, `case_4`
 - Case III patch tables (`case_3_latest_month_patch`, unified variants)
 - Case III delete patch tables (`case_3d_month`, `case_3d_future`, context/unified patch tables)

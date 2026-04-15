@@ -23,8 +23,6 @@
   "case3_hot_window_months": 36,
   "force_case3_unified_on_any_overlap": false,
   "force_case3d_unified_on_any_overlap": false,
-  "use_working_set_latest_context": true,
-  "use_working_set_case3_summary_context": true,
   "force_cold_case3_broadcast": true,
   "cold_case3_broadcast_row_cap": 10000000,
   "columns": {
@@ -194,10 +192,10 @@
     "spark.sql.catalog.primary_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
     "spark.sql.catalog.primary_catalog.type": "glue",
     "spark.sql.catalog.primary_catalog.warehouse": "",
-    "spark.sql.catalog.temp_catalog": "org.apache.iceberg.spark.SparkCatalog",
-    "spark.sql.catalog.temp_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
-    "spark.sql.catalog.temp_catalog.type": "hadoop",
-    "spark.sql.catalog.temp_catalog.warehouse": "",
+    "spark.sql.catalog.execution_catalog": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.sql.catalog.execution_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+    "spark.sql.catalog.execution_catalog.type": "hadoop",
+    "spark.sql.catalog.execution_catalog.warehouse": "",
     "spark.sql.defaultCatalog": "primary_catalog",
     "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
   },

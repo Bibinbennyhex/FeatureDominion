@@ -75,7 +75,7 @@ def main():
         pipeline.write_case_table_bucketed(
             spark=spark,
             df=case_df,
-            table_name="temp_catalog.checkpointdb.case_1",
+            table_name="execution_catalog.checkpointdb.case_1",
             config=config,
             stage="bucket_plan_case_1",
             expected_rows=520,
@@ -88,7 +88,7 @@ def main():
                 EXPLAIN FORMATTED
                 SELECT s.{pk}, s.{prt}
                 FROM {summary_table} s
-                JOIN temp_catalog.checkpointdb.case_1 c
+                JOIN execution_catalog.checkpointdb.case_1 c
                   ON s.{pk} = c.{pk} AND s.{prt} = c.{prt}
                 """
             ).collect()
@@ -100,7 +100,7 @@ def main():
                 f"""
                 EXPLAIN FORMATTED
                 MERGE INTO {summary_table} s
-                USING temp_catalog.checkpointdb.case_1 c
+                USING execution_catalog.checkpointdb.case_1 c
                 ON s.{pk} = c.{pk} AND s.{prt} = c.{prt}
                 WHEN MATCHED AND c.base_ts >= s.base_ts THEN UPDATE SET *
                 WHEN NOT MATCHED THEN INSERT *

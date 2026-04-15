@@ -32,12 +32,10 @@ SNAPSHOT_INTERVAL = 12
 MAX_FILE_SIZE = 256
 HISTORY_LENGTH = 36
 CASE_TEMP_BUCKET_COUNT = 64
-WORKSET_LATEST_SUMMARY_TABLE = "temp_catalog.checkpointdb.workset_latest_summary"
-WORKSET_SUMMARY_CASE3_TABLE = "temp_catalog.checkpointdb.workset_summary_case3"
-CASE3_LATEST_MONTH_PATCH_TABLE = "temp_catalog.checkpointdb.case_3_latest_month_patch"
-CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE = "temp_catalog.checkpointdb.case_3_unified_latest_month_patch"
-CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE = "temp_catalog.checkpointdb.case_3d_latest_history_context_patch"
-CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE = "temp_catalog.checkpointdb.case_3d_unified_latest_history_patch"
+CASE3_LATEST_MONTH_PATCH_TABLE = "execution_catalog.checkpointdb.case_3_latest_month_patch"
+CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE = "execution_catalog.checkpointdb.case_3_unified_latest_month_patch"
+CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE = "execution_catalog.checkpointdb.case_3d_latest_history_context_patch"
+CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE = "execution_catalog.checkpointdb.case_3d_unified_latest_history_patch"
 TRACKER_SOURCE_SUMMARY = "summary"
 TRACKER_SOURCE_LATEST_SUMMARY = "latest_summary"
 TRACKER_SOURCE_COMMITTED = "committed_ingestion_watermark"
@@ -658,103 +656,12 @@ def get_latest_cols(config: Dict[str, Any]) -> List[str]:
         raise ValueError("latest_summary_cols missing from runtime cache; call preload_run_table_columns first")
     return runtime_cache["latest_summary_cols"]
 
-
-def _use_working_set_latest_context(config: Dict[str, Any]) -> bool:
-    return bool(config.get("use_working_set_latest_context", True))
-
-
-def _use_working_set_case3_summary_context(config: Dict[str, Any]) -> bool:
-    return bool(config.get("use_working_set_case3_summary_context", True))
-
-
-def get_latest_context_table(spark: SparkSession, config: Dict[str, Any]) -> str:
-    if _use_working_set_latest_context(config) and spark.catalog.tableExists(WORKSET_LATEST_SUMMARY_TABLE):
-        return WORKSET_LATEST_SUMMARY_TABLE
-    return config["latest_history_table"]
-
-
-def get_case3_summary_context_table(spark: SparkSession, config: Dict[str, Any]) -> str:
-    if _use_working_set_case3_summary_context(config) and spark.catalog.tableExists(WORKSET_SUMMARY_CASE3_TABLE):
-        return WORKSET_SUMMARY_CASE3_TABLE
-    return config["destination_table"]
-
-
 def get_case3_latest_month_patch_table(config: Dict[str, Any]) -> str:
     return config.get("_case3_latest_month_patch_table", CASE3_LATEST_MONTH_PATCH_TABLE)
 
 
 def get_case3d_latest_history_patch_table(config: Dict[str, Any]) -> str:
     return config.get("_case3d_latest_history_patch_table", CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE)
-
-
-def materialize_working_set_context_tables(
-    spark: SparkSession,
-    classified_df,
-    config: Dict[str, Any],
-) -> None:
-    pk = config["primary_column"]
-    prt = config["partition_column"]
-    ts = config["max_identifier_column"]
-    latest_summary_table = config["latest_history_table"]
-    summary_table = config["destination_table"]
-
-    classified_keys = classified_df.select(pk).distinct()
-    classified_keys.createOrReplaceTempView("classified_accounts_all")
-    logger.info("Working-set key scope built: classified_accounts_all")
-
-    case3_keys = (
-        classified_df
-        .filter(F.col("case_type") == "CASE_III")
-        .select(pk)
-        .distinct()
-    )
-    case3_keys.createOrReplaceTempView("case3_accounts_all")
-    logger.info("Working-set key scope built: case3_accounts_all")
-
-    if _use_working_set_latest_context(config):
-        latest_latest_df = (
-            spark.table(latest_summary_table)
-            .withColumn(
-                "_rn",
-                F.row_number().over(
-                    Window.partitionBy(pk).orderBy(F.col(prt).desc(), F.col(ts).desc())
-                ),
-            )
-            .filter(F.col("_rn") == 1)
-            .drop("_rn")
-        )
-        latest_context_df = classified_keys.join(
-            latest_latest_df,
-            on=pk,
-            how="left",
-        )
-        write_case_table_bucketed(
-            spark=spark,
-            df=latest_context_df,
-            table_name=WORKSET_LATEST_SUMMARY_TABLE,
-            config=config,
-            stage="workset_latest_summary_temp",
-            expected_rows=None,
-        )
-
-    if _use_working_set_case3_summary_context(config):
-        if case3_keys.limit(1).isEmpty():
-            summary_context_df = spark.table(summary_table).limit(0)
-        else:
-            summary_context_df = (
-                spark.table(summary_table)
-                .join(F.broadcast(case3_keys), on=pk, how="inner")
-            )
-        write_case_table_bucketed(
-            spark=spark,
-            df=summary_context_df,
-            table_name=WORKSET_SUMMARY_CASE3_TABLE,
-            config=config,
-            stage="workset_summary_case3_temp",
-            expected_rows=None,
-        )
-
-    logger.info("Working-set table creation completed")
 
 
 def get_summary_history_len(config: Dict[str, Any]) -> int:
@@ -1733,7 +1640,7 @@ def process_case_ii(spark: SparkSession, case_ii_df, config: Dict[str, Any], exp
     write_case_table_bucketed(
         spark=spark,
         df=result,
-        table_name="temp_catalog.checkpointdb.case_2",
+        table_name="execution_catalog.checkpointdb.case_2",
         config=config,
         stage="case_2_temp",
         expected_rows=expected_rows,
@@ -1761,8 +1668,8 @@ def process_case_iii_using_latest_history_context(
     pk = config['primary_column']
     prt = config['partition_column']
     ts = config['max_identifier_column']
-    summary_table = get_case3_summary_context_table(spark, config)
-    latest_summary_table = get_latest_context_table(spark, config)
+    summary_table = config["destination_table"]
+    latest_summary_table = config["latest_history_table"]
     history_len = get_summary_history_len(config)
     latest_history_len = get_latest_history_len(config)
     rolling_columns = config.get('rolling_columns', [])
@@ -1949,7 +1856,7 @@ def process_case_iii_using_latest_history_context(
     write_case_table_bucketed(
         spark=spark,
         df=latest_history_patch_df,
-        table_name="temp_catalog.checkpointdb.case_3_latest_history_context_patch",
+        table_name="execution_catalog.checkpointdb.case_3_latest_history_context_patch",
         config=config,
         stage="case_3_latest_history_context_patch_temp",
         expected_rows=expected_rows,
@@ -2027,7 +1934,7 @@ def process_case_iii_using_latest_history_context(
     write_case_table_bucketed(
         spark=spark,
         df=case3a_df,
-        table_name="temp_catalog.checkpointdb.case_3a",
+        table_name="execution_catalog.checkpointdb.case_3a",
         config=config,
         stage="case_3a_temp",
         expected_rows=expected_rows,
@@ -2096,7 +2003,7 @@ def process_case_iii_using_latest_history_context(
         write_case_table_bucketed(
             spark=spark,
             df=case3b_df,
-            table_name="temp_catalog.checkpointdb.case_3b",
+            table_name="execution_catalog.checkpointdb.case_3b",
             config=config,
             stage="case_3b_temp",
             expected_rows=expected_rows,
@@ -2203,11 +2110,11 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
                 logger.info("Case III split mode: hot-only + cold-only lanes (no account overlap)")
 
             split_case_tables = {
-                "temp_catalog.checkpointdb.case_3a": "case_3a_temp_split_combine",
-                "temp_catalog.checkpointdb.case_3b": "case_3b_temp_split_combine",
+                "execution_catalog.checkpointdb.case_3a": "case_3a_temp_split_combine",
+                "execution_catalog.checkpointdb.case_3b": "case_3b_temp_split_combine",
                 CASE3_LATEST_MONTH_PATCH_TABLE: "case_3_latest_month_patch_temp_split_combine",
                 CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE: "case_3_unified_latest_month_patch_temp_split_combine",
-                "temp_catalog.checkpointdb.case_3_latest_history_context_patch": "case_3_latest_history_context_patch_temp_split_combine",
+                "execution_catalog.checkpointdb.case_3_latest_history_context_patch": "case_3_latest_history_context_patch_temp_split_combine",
             }
             snapshot_groups: List[Dict[str, str]] = []
 
@@ -2292,7 +2199,7 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     pk = config['primary_column']
     prt = config['partition_column']
     ts = config['max_identifier_column']
-    summary_table = get_case3_summary_context_table(spark, config)
+    summary_table = config["destination_table"]
     history_len = get_summary_history_len(config)
     rolling_columns = config.get('rolling_columns', [])
     grid_columns = config.get('grid_columns', [])
@@ -2626,7 +2533,7 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     write_case_table_bucketed(
         spark=spark,
         df=new_backfill_rows,
-        table_name="temp_catalog.checkpointdb.case_3a",
+        table_name="execution_catalog.checkpointdb.case_3a",
         config=config,
         stage="case_3a_temp",
         expected_rows=expected_rows,
@@ -2762,7 +2669,7 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
         write_case_table_bucketed(
             spark=spark,
             df=backfill_updates_df,
-            table_name="temp_catalog.checkpointdb.case_3b",
+            table_name="execution_catalog.checkpointdb.case_3b",
             config=config,
             stage="case_3b_temp",
             expected_rows=expected_rows,
@@ -2801,8 +2708,8 @@ def process_case_iii_soft_delete_using_latest_history_context(
     pk = config['primary_column']
     prt = config['partition_column']
     ts = config['max_identifier_column']
-    summary_table = get_case3_summary_context_table(spark, config)
-    latest_summary_table = get_latest_context_table(spark, config)
+    summary_table = config["destination_table"]
+    latest_summary_table = config["latest_history_table"]
     history_len = get_summary_history_len(config)
     latest_history_len = get_latest_history_len(config)
     rolling_columns = config.get('rolling_columns', [])
@@ -2862,7 +2769,7 @@ def process_case_iii_soft_delete_using_latest_history_context(
     write_case_table_bucketed(
         spark=spark,
         df=delete_month_update_df,
-        table_name="temp_catalog.checkpointdb.case_3d_month",
+        table_name="execution_catalog.checkpointdb.case_3d_month",
         config=config,
         stage="case_3d_month_temp",
         expected_rows=expected_rows,
@@ -2962,7 +2869,7 @@ def process_case_iii_soft_delete_using_latest_history_context(
         write_case_table_bucketed(
             spark=spark,
             df=future_patch_df,
-            table_name="temp_catalog.checkpointdb.case_3d_future",
+            table_name="execution_catalog.checkpointdb.case_3d_future",
             config=config,
             stage="case_3d_future_temp",
             expected_rows=expected_rows,
@@ -3147,8 +3054,8 @@ def process_case_iii_soft_delete(
                 logger.info("Case III soft-delete split mode: hot-only + cold-only lanes (no account overlap)")
 
             split_case_tables = {
-                "temp_catalog.checkpointdb.case_3d_month": "case_3d_month_temp_split_combine",
-                "temp_catalog.checkpointdb.case_3d_future": "case_3d_future_temp_split_combine",
+                "execution_catalog.checkpointdb.case_3d_month": "case_3d_month_temp_split_combine",
+                "execution_catalog.checkpointdb.case_3d_future": "case_3d_future_temp_split_combine",
                 CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE: "case_3d_latest_history_context_patch_temp_split_combine",
                 CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE: "case_3d_unified_latest_history_patch_temp_split_combine",
             }
@@ -3258,8 +3165,8 @@ def process_case_iii_soft_delete(
 
     prt = config['partition_column']
     ts = config['max_identifier_column']
-    summary_table = get_case3_summary_context_table(spark, config)
-    latest_summary_table = get_latest_context_table(spark, config)
+    summary_table = config["destination_table"]
+    latest_summary_table = config["latest_history_table"]
     history_len = get_summary_history_len(config)
     latest_history_len = get_latest_history_len(config)
     rolling_columns = config.get('rolling_columns', [])
@@ -3336,7 +3243,7 @@ def process_case_iii_soft_delete(
     write_case_table_bucketed(
         spark=spark,
         df=delete_month_update_df,
-        table_name="temp_catalog.checkpointdb.case_3d_month",
+        table_name="execution_catalog.checkpointdb.case_3d_month",
         config=config,
         stage="case_3d_month_temp",
         expected_rows=expected_rows,
@@ -3437,7 +3344,7 @@ def process_case_iii_soft_delete(
         write_case_table_bucketed(
             spark=spark,
             df=future_delete_updates_df,
-            table_name="temp_catalog.checkpointdb.case_3d_future",
+            table_name="execution_catalog.checkpointdb.case_3d_future",
             config=config,
             stage="case_3d_future_temp",
             expected_rows=expected_rows,
@@ -3710,7 +3617,7 @@ def process_case_iv(spark: SparkSession, case_iv_df, case_i_result, config: Dict
     write_case_table_bucketed(
         spark=spark,
         df=result,
-        table_name="temp_catalog.checkpointdb.case_4",
+        table_name="execution_catalog.checkpointdb.case_4",
         config=config,
         stage="case_4_temp",
         expected_rows=expected_rows,
@@ -3780,21 +3687,21 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
                 merged = merged.unionByName(d, allowMissingColumns=True)
             return merged
 
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3a"):
-            case_3a_df = spark.read.table('temp_catalog.checkpointdb.case_3a')
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3a"):
+            case_3a_df = spark.read.table('execution_catalog.checkpointdb.case_3a')
 
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3b"):
-            case_3b_df = spark.read.table('temp_catalog.checkpointdb.case_3b')
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3b"):
+            case_3b_df = spark.read.table('execution_catalog.checkpointdb.case_3b')
             if case_3a_df is not None:
                 case_3b_filtered_df = case_3b_df.join(case_3a_df.select(pk, prt), [pk, prt], "left_anti")
             else:
                 case_3b_filtered_df = case_3b_df
 
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3d_month"):
-            case_3d_month_df = spark.read.table("temp_catalog.checkpointdb.case_3d_month")
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3d_month"):
+            case_3d_month_df = spark.read.table("execution_catalog.checkpointdb.case_3d_month")
 
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3d_future"):
-            case_3d_future_df = spark.read.table("temp_catalog.checkpointdb.case_3d_future")
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3d_future"):
+            case_3d_future_df = spark.read.table("execution_catalog.checkpointdb.case_3d_future")
 
         case_3_latest_month_patch_df = _read_union_if_exists(case3_latest_month_patch_tables)
         case_3d_latest_history_patch_df = _read_union_if_exists(case3d_latest_history_patch_tables)
@@ -4020,8 +3927,8 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
             logger.info("-" * 60)
 
         process_start_time = time.time()
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3_latest_history_context_patch"):
-            latest_case_3_history_df = spark.read.table("temp_catalog.checkpointdb.case_3_latest_history_context_patch")
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3_latest_history_context_patch"):
+            latest_case_3_history_df = spark.read.table("execution_catalog.checkpointdb.case_3_latest_history_context_patch")
             latest_case_3_history_df = align_history_arrays_to_length(
                 latest_case_3_history_df,
                 rolling_columns,
@@ -4139,7 +4046,7 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
         logger.info("MERGING NEW/BULK RECORDS:")
         process_start_time = time.time()
 
-        append_tables = ["temp_catalog.checkpointdb.case_1","temp_catalog.checkpointdb.case_4"]
+        append_tables = ["execution_catalog.checkpointdb.case_1","execution_catalog.checkpointdb.case_4"]
 
         dfs = []
         for t in append_tables:
@@ -4257,8 +4164,8 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
         case3_select_cols = [pk] + update_cols
 
         case_3b_latest_df = None
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3b"):
-            case_3b_latest_df = spark.read.table("temp_catalog.checkpointdb.case_3b").select(*case3_select_cols)
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3b"):
+            case_3b_latest_df = spark.read.table("execution_catalog.checkpointdb.case_3b").select(*case3_select_cols)
             case_3b_latest_df = (
                 case_3b_latest_df
                 .withColumn("_rn", F.row_number().over(Window.partitionBy(pk).orderBy(F.col(prt).desc(), F.col(ts).desc())))
@@ -4267,8 +4174,8 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
             )
 
         case_3a_latest_df = None
-        if spark.catalog.tableExists("temp_catalog.checkpointdb.case_3a"):
-            case_3a_latest_df = spark.read.table("temp_catalog.checkpointdb.case_3a").select(*case3_select_cols)
+        if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3a"):
+            case_3a_latest_df = spark.read.table("execution_catalog.checkpointdb.case_3a").select(*case3_select_cols)
             if case_3b_latest_df is not None:
                 case_3a_latest_df = case_3a_latest_df.join(
                     case_3b_latest_df.select(pk).distinct(),
@@ -4585,8 +4492,8 @@ def write_forward_results(spark: SparkSession, config: Dict[str, Any], expected_
         logger.info("MERGING FORWARD RECORDS:")
         process_start_time = time.time()
 
-        if spark.catalog.tableExists('temp_catalog.checkpointdb.case_2'):
-            case_2_df = spark.read.table('temp_catalog.checkpointdb.case_2')
+        if spark.catalog.tableExists('execution_catalog.checkpointdb.case_2'):
+            case_2_df = spark.read.table('execution_catalog.checkpointdb.case_2')
             merge_window = Window.partitionBy(pk, prt).orderBy(F.col(ts).desc())
             case_2_merge_df = (
                 case_2_df
@@ -4774,8 +4681,6 @@ def run_pipeline(spark: SparkSession, config: Dict[str, Any]):
         )
         logger.info(f"Soft-delete rows in batch: {soft_delete_count:,}")
 
-        materialize_working_set_context_tables(spark, classified, config)
-
         # =========================================================================
         # STEP 2: PROCESS EACH CASE AND WRITE TO TEMP TABLE
         # Process in CORRECT order: Backfill -> New -> Bulk Historical -> Forward
@@ -4806,7 +4711,7 @@ def run_pipeline(spark: SparkSession, config: Dict[str, Any]):
             write_case_table_bucketed(
                 spark=spark,
                 df=case_i_result,
-                table_name="temp_catalog.checkpointdb.case_1",
+                table_name="execution_catalog.checkpointdb.case_1",
                 config=config,
                 stage="case_1_temp",
                 expected_rows=case_i_count,
@@ -4899,17 +4804,14 @@ def cleanup(spark: SparkSession):
         'case_3d_latest_history_context_patch',
         'case_3d_unified_latest_history_patch',
         'case_4',
-        'workset_latest_summary',
-        'workset_summary_case3',
     ]
 
     for table in cleanup_tables:
-        spark.sql(f"DROP TABLE IF EXISTS temp_catalog.checkpointdb.{table}")
-        logger.info(f"Cleaned {table}")
-
-    for view_name in ["classified_accounts_all", "case3_accounts_all"]:
-        if spark.catalog.tableExists(view_name):
-            spark.catalog.dropTempView(view_name)
+        try:
+            spark.sql(f"DROP TABLE IF EXISTS execution_catalog.checkpointdb.{table}")
+            logger.info(f"Cleaned {table}")
+        except Exception as exc:
+            logger.warning(f"Failed to clean {table}: {exc}")
 
     logger.info("CLEANUP COMPLETED")
     logger.info("=" * 60)
@@ -4936,7 +4838,7 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
     
     try: 
-        # Cleanup of existing temp_catalog      
+        # Cleanup of existing execution_catalog      
         cleanup(spark)
         run_pipeline(spark, config)
         logger.info(f"Pipeline completed")

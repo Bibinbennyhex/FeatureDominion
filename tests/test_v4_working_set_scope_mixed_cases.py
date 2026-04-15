@@ -30,8 +30,8 @@ def test_v4_working_set_scope_mixed_cases():
     config["use_working_set_latest_context"] = True
     config["use_working_set_case3_summary_context"] = True
 
-    workset_latest_table = "temp_catalog.checkpointdb.workset_latest_summary"
-    workset_case3_table = "temp_catalog.checkpointdb.workset_summary_case3"
+    workset_latest_table = "execution_catalog.checkpointdb.workset_latest_summary"
+    workset_case3_table = "execution_catalog.checkpointdb.workset_summary_case3"
 
     try:
         module.cleanup(spark)

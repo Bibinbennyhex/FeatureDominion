@@ -226,7 +226,7 @@ LATEST_SUMMARY_SCHEMA = _build_schema(LATEST_SUMMARY_SCHEMA_SPEC)
 
 
 def create_spark_session(app_name: str) -> SparkSession:
-    temp_catalog_warehouse = os.environ.get("TEST_TEMP_CATALOG_WAREHOUSE", "").strip()
+    execution_catalog_warehouse = os.environ.get("TEST_execution_catalog_WAREHOUSE", "").strip()
     builder = (
         SparkSession.builder.appName(app_name)
         .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
@@ -236,9 +236,9 @@ def create_spark_session(app_name: str) -> SparkSession:
         .config("spark.sql.catalog.primary_catalog.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
         .config("spark.sql.catalog.primary_catalog.warehouse", "s3://warehouse/")
         .config("spark.sql.catalog.primary_catalog.s3.endpoint", "http://minio:9000")
-        .config("spark.sql.catalog.temp_catalog", "org.apache.iceberg.spark.SparkCatalog")
-        .config("spark.sql.catalog.temp_catalog.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
-        .config("spark.sql.catalog.temp_catalog.s3.endpoint", "http://minio:9000")
+        .config("spark.sql.catalog.execution_catalog", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.execution_catalog.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        .config("spark.sql.catalog.execution_catalog.s3.endpoint", "http://minio:9000")
         .config("spark.sql.defaultCatalog", "primary_catalog")
         .config("spark.ui.showConsoleProgress", "false")
         .config("spark.sql.iceberg.planning.preserve-data-grouping", "true")
@@ -252,19 +252,19 @@ def create_spark_session(app_name: str) -> SparkSession:
         .config("spark.hadoop.fs.s3a.secret.key", "password")
         .config("spark.hadoop.fs.s3a.path.style.access", "true")
     )
-    if temp_catalog_warehouse:
+    if execution_catalog_warehouse:
         builder = (
             builder
-            .config("spark.sql.catalog.temp_catalog.type", "hadoop")
-            .config("spark.sql.catalog.temp_catalog.io-impl", "org.apache.iceberg.hadoop.HadoopFileIO")
-            .config("spark.sql.catalog.temp_catalog.warehouse", temp_catalog_warehouse)
+            .config("spark.sql.catalog.execution_catalog.type", "hadoop")
+            .config("spark.sql.catalog.execution_catalog.io-impl", "org.apache.iceberg.hadoop.HadoopFileIO")
+            .config("spark.sql.catalog.execution_catalog.warehouse", execution_catalog_warehouse)
         )
     else:
         builder = (
             builder
-            .config("spark.sql.catalog.temp_catalog.type", "rest")
-            .config("spark.sql.catalog.temp_catalog.uri", "http://rest:8181")
-            .config("spark.sql.catalog.temp_catalog.warehouse", "s3://warehouse/")
+            .config("spark.sql.catalog.execution_catalog.type", "rest")
+            .config("spark.sql.catalog.execution_catalog.uri", "http://rest:8181")
+            .config("spark.sql.catalog.execution_catalog.warehouse", "s3://warehouse/")
         )
 
     spark = builder.enableHiveSupport().getOrCreate()
@@ -330,7 +330,7 @@ def _ensure_base_tables(spark: SparkSession, config: Dict):
     namespace = source_table.rsplit(".", 1)[0]
 
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {namespace}")
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS temp_catalog.checkpointdb")
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS execution_catalog.checkpointdb")
 
     spark.sql(
         f"""
@@ -408,12 +408,12 @@ def reset_tables(spark: SparkSession, config: Dict):
         for table in [source_table, summary_table, latest_table, hist_rpt_dt_table, tracker_table]:
             spark.sql(f"DROP TABLE IF EXISTS {table}")
         for temp_case in _temp_case_tables():
-            spark.sql(f"DROP TABLE IF EXISTS temp_catalog.checkpointdb.{temp_case}")
+            spark.sql(f"DROP TABLE IF EXISTS execution_catalog.checkpointdb.{temp_case}")
         _ensure_base_tables(spark, config)
     else:
         _ensure_base_tables(spark, config)
         for temp_case in _temp_case_tables():
-            spark.sql(f"DROP TABLE IF EXISTS temp_catalog.checkpointdb.{temp_case}")
+            spark.sql(f"DROP TABLE IF EXISTS execution_catalog.checkpointdb.{temp_case}")
         if not assume_precreated_empty:
             for table in [source_table, summary_table, latest_table, hist_rpt_dt_table, tracker_table]:
                 spark.sql(f"DELETE FROM {table} WHERE 1 = 1")

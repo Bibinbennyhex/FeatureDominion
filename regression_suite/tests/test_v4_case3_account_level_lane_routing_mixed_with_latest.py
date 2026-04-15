@@ -96,11 +96,11 @@ def test_v4_case3_account_level_lane_routing_mixed_with_latest():
 
         history_patch_keys = _table_key_set(
             spark,
-            "temp_catalog.checkpointdb.case_3_latest_history_context_patch",
+            "execution_catalog.checkpointdb.case_3_latest_history_context_patch",
         )
         latest_month_patch_keys = _table_key_set(
             spark,
-            "temp_catalog.checkpointdb.case_3_latest_month_patch",
+            "execution_catalog.checkpointdb.case_3_latest_month_patch",
         )
 
         _assert_true(
