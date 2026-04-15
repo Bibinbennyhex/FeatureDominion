@@ -50,7 +50,6 @@ def test_v4_case3_account_level_lane_routing():
     config["validate_latest_history_window"] = True
     config["enable_case3_hot_cold_split"] = True
     config["case3_hot_window_months"] = 36
-    config["force_case3_unified_on_any_overlap"] = False
 
     cold_acct = 9101
     hot_acct = 9102
@@ -158,4 +157,3 @@ def test_v4_case3_account_level_lane_routing():
 if __name__ == "__main__":
     test_v4_case3_account_level_lane_routing()
     print("[PASS] test_v4_case3_account_level_lane_routing.py")
-

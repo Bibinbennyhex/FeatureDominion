@@ -21,8 +21,6 @@
   "latest_history_window_months": 72,
   "enable_case3_hot_cold_split": true,
   "case3_hot_window_months": 36,
-  "force_case3_unified_on_any_overlap": false,
-  "force_case3d_unified_on_any_overlap": false,
   "use_working_set_latest_context": true,
   "use_working_set_case3_summary_context": true,
   "force_cold_case3_broadcast": true,
@@ -201,7 +199,6 @@
     "spark.sql.defaultCatalog": "primary_catalog",
     "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
   },
-  "use_latest_history_context_case3": true,
   "use_latest_history_context": true,
   "validate_latest_history_window": true,
   "validate_latest_history_uniqueness": true

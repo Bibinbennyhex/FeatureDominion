@@ -67,6 +67,9 @@ V4_NIGHTLY_ADDITIONAL_TESTS = [
     "test_v4_null_update_case_iii_soft_delete.py",
     "test_v4_aggressive_idempotency.py",
     "test_v4_case3_comprehensive.py",
+    "test_v4_case3_hot_lane_fail_fast_missing_latest.py",
+    "test_v4_case3_hot_lane_fail_fast_missing_history_cols.py",
+    "test_v4_case3_no_global_month_checks.py",
 ]
 
 # One behavior label per canonical test in this unique suite.
@@ -94,6 +97,9 @@ V4_BEHAVIOR_LABELS = {
     "test_v4_null_update_case_iii_soft_delete.py": "v4_case3_soft_delete_null_payload",
     "test_v4_aggressive_idempotency.py": "v4_aggressive_idempotency",
     "test_v4_case3_comprehensive.py": "v4_case3_comprehensive_matrix",
+    "test_v4_case3_hot_lane_fail_fast_missing_latest.py": "v4_case3_hot_lane_fail_fast_missing_latest",
+    "test_v4_case3_hot_lane_fail_fast_missing_history_cols.py": "v4_case3_hot_lane_fail_fast_missing_history_cols",
+    "test_v4_case3_no_global_month_checks.py": "v4_case3_no_global_month_checks",
 }
 
 

@@ -91,13 +91,10 @@ def test_v4_case3_soft_delete_hot_cold_split():
         split_df = case_iii_delete
         if "month_int" not in split_df.columns:
             split_df = split_df.withColumn("month_int", F.expr(module.month_to_int_expr(config["partition_column"])))
-
-        latest_month = split_df.agg(F.max("max_existing_month").alias("m")).first()["m"]
-        latest_int = int(latest_month[:4]) * 12 + int(latest_month[5:7])
-        hot_cutoff_int = latest_int - (int(config["case3_hot_window_months"]) - 1)
+        split_df = split_df.withColumn("case3_month_diff", F.col("max_month_int") - F.col("month_int"))
         split_counts = split_df.agg(
-            F.sum(F.when(F.col("month_int") >= F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("hot_count"),
-            F.sum(F.when(F.col("month_int") < F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("cold_count"),
+            F.sum(F.when(F.col("case3_month_diff") <= F.lit(int(config["case3_hot_window_months"])), F.lit(1)).otherwise(F.lit(0))).alias("hot_count"),
+            F.sum(F.when(F.col("case3_month_diff") > F.lit(int(config["case3_hot_window_months"])), F.lit(1)).otherwise(F.lit(0))).alias("cold_count"),
         ).first()
 
         hot_count = int(split_counts["hot_count"] or 0)

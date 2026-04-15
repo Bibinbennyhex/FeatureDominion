@@ -55,6 +55,13 @@ def test_v4_case3_hot_and_cold_split():
                 actual_payment=700,
             ),
             tu.build_summary_row(
+                cons_acct_key=9003,
+                rpt_as_of_mo="2026-01",
+                base_ts=existing_ts,
+                balance=8000,
+                actual_payment=800,
+            ),
+            tu.build_summary_row(
                 cons_acct_key=9999,
                 rpt_as_of_mo="2020-01",
                 base_ts=existing_ts,
@@ -66,11 +73,13 @@ def test_v4_case3_hot_and_cold_split():
         tu.write_summary_rows(spark, config["latest_history_table"], pad_latest_rows(existing_rows))
 
         # Case III input:
-        # - 9001 @ 2025-12 => HOT (within last 36 months from 2026-01)
-        # - 9002 @ 2022-12 => COLD (older than 36 months from 2026-01)
+        # - 9001 @ 2025-12 => HOT (diff=1)
+        # - 9003 @ 2023-01 => HOT boundary (diff=36, inclusive)
+        # - 9002 @ 2022-12 => COLD (diff=37)
         source_rows = [
             tu.build_source_row(9001, "2025-12", source_ts, balance=5100, actual_payment=510),
             tu.build_source_row(9002, "2022-12", source_ts, balance=7100, actual_payment=710),
+            tu.build_source_row(9003, "2023-01", source_ts, balance=8100, actual_payment=810),
         ]
         tu.write_source_rows(spark, config["source_table"], source_rows)
         module.ensure_soft_delete_columns(spark, config)
@@ -79,43 +88,36 @@ def test_v4_case3_hot_and_cold_split():
         classified = module.load_and_classify_accounts(spark, config)
         case_iii_df = classified.filter((F.col("case_type") == "CASE_III") & (~F.col("_is_soft_delete")))
 
-        _assert_true(case_iii_df.count() == 2, "Expected exactly 2 CASE_III records")
+        _assert_true(case_iii_df.count() == 3, "Expected exactly 3 CASE_III records")
 
-        prt = config["partition_column"]
         hot_window = int(config.get("case3_hot_window_months", 36))
         split_df = case_iii_df
         if "month_int" not in split_df.columns:
-            split_df = split_df.withColumn("month_int", F.expr(module.month_to_int_expr(prt)))
-
-        global_latest_month = (
-            split_df
-            .agg(F.max("max_existing_month").alias("global_latest_month"))
-            .first()["global_latest_month"]
-        )
-        _assert_true(global_latest_month is not None, "global_latest_month should not be null")
-
-        latest_int = int(global_latest_month[:4]) * 12 + int(global_latest_month[5:7])
-        hot_cutoff_int = latest_int - (hot_window - 1)
+            split_df = split_df.withColumn("month_int", F.expr(module.month_to_int_expr(config["partition_column"])))
+        split_df = split_df.withColumn("case3_month_diff", F.col("max_month_int") - F.col("month_int"))
         split_counts = (
             split_df
             .agg(
-                F.sum(F.when(F.col("month_int") >= F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("hot_count"),
-                F.sum(F.when(F.col("month_int") < F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("cold_count"),
+                F.sum(F.when(F.col("case3_month_diff") <= F.lit(hot_window), F.lit(1)).otherwise(F.lit(0))).alias("hot_count"),
+                F.sum(F.when(F.col("case3_month_diff") > F.lit(hot_window), F.lit(1)).otherwise(F.lit(0))).alias("cold_count"),
             )
             .first()
         )
         hot_count = int(split_counts["hot_count"] or 0)
         cold_count = int(split_counts["cold_count"] or 0)
 
-        _assert_true(hot_count > 0, "Expected at least one hot CASE_III row")
-        _assert_true(cold_count > 0, "Expected at least one cold CASE_III row")
+        _assert_true(hot_count == 2, f"Expected 2 hot CASE_III rows, got {hot_count}")
+        _assert_true(cold_count == 1, f"Expected 1 cold CASE_III row, got {cold_count}")
+
+        boundary_row = split_df.filter(F.col("cons_acct_key") == F.lit(9003)).select("case3_month_diff").first()
+        _assert_true(int(boundary_row["case3_month_diff"]) == 36, "Boundary row should be diff=36")
 
         # Execute Case III to ensure both lanes are processable end-to-end.
-        module.process_case_iii(spark, case_iii_df, config, expected_rows=2)
+        module.process_case_iii(spark, case_iii_df, config, expected_rows=3)
 
         print(
             "[PASS] v4 hot/cold split verified "
-            f"(latest_month={global_latest_month}, hot_rows={hot_count}, cold_rows={cold_count})"
+            f"(hot_rows={hot_count}, cold_rows={cold_count}, inclusive_boundary=36)"
         )
 
     finally:

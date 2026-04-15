@@ -953,6 +953,137 @@ def combine_case_table_snapshots(
         )
 
 
+def _build_case3_hot_cold_lanes(
+    df,
+    config: Dict[str, Any],
+) -> Tuple[Any, Any, Dict[str, int]]:
+    pk = config["primary_column"]
+    prt = config["partition_column"]
+    hot_window = max(1, int(config.get("case3_hot_window_months", 36)))
+
+    split_df = df
+    if "month_int" not in split_df.columns:
+        split_df = split_df.withColumn("month_int", F.expr(month_to_int_expr(prt)))
+    if "max_month_int" not in split_df.columns:
+        raise ValueError("CASE III split requires max_month_int in classified dataframe")
+
+    split_df = split_df.withColumn("case3_month_diff", F.col("max_month_int") - F.col("month_int"))
+    hot_candidates = split_df.filter(F.col("case3_month_diff") <= F.lit(hot_window))
+    cold_candidates = split_df.filter(F.col("case3_month_diff") > F.lit(hot_window))
+
+    overlap_accounts = (
+        hot_candidates.select(pk).distinct()
+        .intersect(cold_candidates.select(pk).distinct())
+        .distinct()
+    )
+
+    hot_only_df = hot_candidates.join(overlap_accounts, on=pk, how="left_anti")
+    overlap_rows = split_df.join(overlap_accounts, on=pk, how="left_semi")
+    cold_complete_df = cold_candidates.unionByName(overlap_rows, allowMissingColumns=True).dropDuplicates()
+
+    counts = (
+        split_df.agg(
+            F.count(F.lit(1)).alias("total_rows"),
+            F.sum(F.when(F.col("case3_month_diff") <= F.lit(hot_window), F.lit(1)).otherwise(F.lit(0))).alias("hot_candidate_rows"),
+            F.sum(F.when(F.col("case3_month_diff") > F.lit(hot_window), F.lit(1)).otherwise(F.lit(0))).alias("cold_candidate_rows"),
+        ).first()
+    )
+    total_rows = int(counts["total_rows"] or 0)
+    hot_candidate_rows = int(counts["hot_candidate_rows"] or 0)
+    cold_candidate_rows = int(counts["cold_candidate_rows"] or 0)
+    overlap_account_count = int(overlap_accounts.count() or 0)
+    hot_only_rows = int(hot_only_df.count() or 0)
+    cold_complete_rows = int(cold_complete_df.count() or 0)
+
+    overlap_in_hot = hot_only_df.join(overlap_accounts, on=pk, how="left_semi").limit(1).count()
+    if overlap_in_hot != 0:
+        raise ValueError("Invalid CASE III routing: overlap accounts leaked into hot_only lane")
+    missing_overlap_in_cold = overlap_accounts.join(
+        cold_complete_df.select(pk).distinct(),
+        on=pk,
+        how="left_anti",
+    ).limit(1).count()
+    if missing_overlap_in_cold != 0:
+        raise ValueError("Invalid CASE III routing: overlap accounts missing from cold_complete lane")
+    if hot_only_rows + cold_complete_rows != total_rows:
+        raise ValueError(
+            f"Invalid CASE III routing row accounting: hot_only_rows={hot_only_rows}, "
+            f"cold_complete_rows={cold_complete_rows}, total_rows={total_rows}"
+        )
+
+    metrics = {
+        "total_rows": total_rows,
+        "hot_candidate_rows": hot_candidate_rows,
+        "cold_candidate_rows": cold_candidate_rows,
+        "overlap_account_count": overlap_account_count,
+        "hot_only_rows": hot_only_rows,
+        "cold_complete_rows": cold_complete_rows,
+        "hot_window_months": hot_window,
+    }
+    return hot_only_df, cold_complete_df, metrics
+
+
+def _validate_hot_lane_latest_context(
+    spark: SparkSession,
+    hot_only_df,
+    config: Dict[str, Any],
+    lane_label: str,
+) -> None:
+    if hot_only_df is None or hot_only_df.isEmpty():
+        return
+
+    pk = config["primary_column"]
+    latest_summary_table = config["latest_history_table"]
+    rolling_columns = config.get("rolling_columns", [])
+    history_cols = [f"{rc['name']}_history" for rc in rolling_columns]
+    latest_cols = set(get_latest_cols(config))
+    missing_cols = [col for col in history_cols if col not in latest_cols]
+    if missing_cols:
+        raise ValueError(
+            f"{lane_label} hot-only lane requires latest_summary history columns; missing={missing_cols[:5]}"
+        )
+
+    hot_accounts = hot_only_df.select(pk).distinct()
+    latest_accounts = spark.table(latest_summary_table).select(pk).distinct()
+    missing_accounts_df = hot_accounts.join(latest_accounts, on=pk, how="left_anti")
+    missing_count = int(missing_accounts_df.count() or 0)
+    if missing_count > 0:
+        sample_keys = [int(r[pk]) for r in missing_accounts_df.limit(10).collect()]
+        hot_count = int(hot_accounts.count() or 0)
+        raise ValueError(
+            f"{lane_label} hot-only lane missing latest_summary rows for accounts; "
+            f"missing_count={missing_count}, hot_account_count={hot_count}, sample_keys={sample_keys}"
+        )
+
+
+def _compute_hot_submetrics(
+    hot_df,
+    config: Dict[str, Any],
+) -> Dict[str, int]:
+    if hot_df is None or hot_df.isEmpty():
+        return {"latest_month_rows": 0, "older_hot_rows": 0}
+
+    prt = config["partition_column"]
+    metric_df = hot_df
+    if "month_int" not in metric_df.columns:
+        metric_df = metric_df.withColumn("month_int", F.expr(month_to_int_expr(prt)))
+    if "max_month_int" not in metric_df.columns:
+        raise ValueError("Hot-lane submetrics require max_month_int in classified dataframe")
+
+    counts = (
+        metric_df
+        .agg(
+            F.sum(F.when(F.col("month_int") == F.col("max_month_int"), F.lit(1)).otherwise(F.lit(0))).alias("latest_month_rows"),
+            F.sum(F.when(F.col("month_int") < F.col("max_month_int"), F.lit(1)).otherwise(F.lit(0))).alias("older_hot_rows"),
+        )
+        .first()
+    )
+    return {
+        "latest_month_rows": int(counts["latest_month_rows"] or 0),
+        "older_hot_rows": int(counts["older_hot_rows"] or 0),
+    }
+
+
 def build_balanced_month_chunks(
     month_weights: List[Tuple[str, float]],
     overflow_ratio: float = 0.10,
@@ -1659,11 +1790,10 @@ def process_case_iii_using_latest_history_context(
     case_iii_df,
     config: Dict[str, Any],
     expected_rows: Optional[int] = None,
-) -> bool:
+) -> None:
     """
-    V4 path: build Case III rolling arrays from latest_summary history arrays.
-    Avoids reading summary history arrays for Case III array generation.
-    Returns True when handled; False to fallback to legacy path.
+    Build Case III rolling arrays from latest_summary history arrays.
+    This is the canonical hot-lane path (no legacy fallback).
     """
     pk = config['primary_column']
     prt = config['partition_column']
@@ -1677,37 +1807,22 @@ def process_case_iii_using_latest_history_context(
     case3_latest_patch_table = get_case3_latest_month_patch_table(config)
 
     if case_iii_df is None or case_iii_df.isEmpty():
-        return True
+        return
 
     history_cols = [f"{rc['name']}_history" for rc in rolling_columns]
     latest_cols = set(get_latest_cols(config))
     has_physical_history = all(c in latest_cols for c in history_cols)
     if not has_physical_history:
-        logger.warning("Case III latest-history path requires *_history columns in latest_summary; falling back to legacy Case III")
-        return False
+        raise ValueError("Case III hot-only lane requires *_history columns in latest_summary")
 
-    global_latest_month = (
-        case_iii_df
-        .agg(F.max("max_existing_month").alias("global_latest_month"))
-        .first()["global_latest_month"]
-    )
-    if global_latest_month is None:
-        return True
+    split_df = case_iii_df
+    if "month_int" not in split_df.columns:
+        split_df = split_df.withColumn("month_int", F.expr(month_to_int_expr(prt)))
+    if "max_month_int" not in split_df.columns:
+        raise ValueError("Case III hot-only lane requires max_month_int in classified dataframe")
 
-    case_iii_latest_df = case_iii_df.filter(F.col(prt) == F.lit(global_latest_month))
-    split_counts = (
-        case_iii_df
-        .agg(
-            F.sum(F.when(F.col(prt) == F.lit(global_latest_month), F.lit(1)).otherwise(F.lit(0))).alias("latest_count"),
-            F.sum(F.when(F.col(prt) < F.lit(global_latest_month), F.lit(1)).otherwise(F.lit(0))).alias("older_count"),
-        )
-        .first()
-    )
-    latest_count = int(split_counts["latest_count"] or 0)
-    older_count = int(split_counts["older_count"] or 0)
-    logger.info(
-        f"Case III latest-history path selected for latest_month={global_latest_month}"
-    )
+    case_iii_latest_df = split_df.filter(F.col("month_int") == F.col("max_month_int"))
+    latest_count = int(case_iii_latest_df.count() or 0)
 
     # Keep latest-month patch behavior for summary table (index-0 update on current latest month rows).
     if latest_count > 0:
@@ -1746,9 +1861,7 @@ def process_case_iii_using_latest_history_context(
         logger.info(f"Case III latest-month patch table generated: {case3_latest_patch_table}")
 
     # Build peer map for all Case III rows (latest + older) for overwrite precedence.
-    backfill_all = case_iii_df
-    if "month_int" not in backfill_all.columns:
-        backfill_all = backfill_all.withColumn("month_int", F.expr(month_to_int_expr(prt)))
+    backfill_all = split_df
     val_struct_fields = []
     for rc in rolling_columns:
         mapper_column = rc['mapper_column']
@@ -1761,6 +1874,12 @@ def process_case_iii_using_latest_history_context(
                 F.struct(F.col("month_int"), F.struct(*val_struct_fields))
             ).over(peer_window)
         )
+    )
+    older_with_peer = backfill_all.filter(F.col("month_int") < F.col("max_month_int"))
+    older_count = int(older_with_peer.count() or 0)
+    logger.info(
+        "Case III latest-history path selected | "
+        f"latest_rows={latest_count}, older_rows={older_count}"
     )
     peer_per_account = backfill_all.select(pk, "peer_map").dropDuplicates([pk])
 
@@ -1784,8 +1903,19 @@ def process_case_iii_using_latest_history_context(
         .withColumn("latest_month_int", F.expr(month_to_int_expr(prt)))
     )
     if latest_ctx.isEmpty():
-        logger.warning("No non-deleted latest_summary context for Case III; falling back to legacy Case III")
-        return False
+        raise ValueError("Case III hot-only lane has no non-deleted latest_summary context rows")
+
+    missing_latest_accounts = (
+        affected_accounts
+        .join(latest_ctx.select(pk).distinct(), on=pk, how="left_anti")
+    )
+    missing_latest_count = int(missing_latest_accounts.count() or 0)
+    if missing_latest_count > 0:
+        sample_keys = [int(r[pk]) for r in missing_latest_accounts.limit(10).collect()]
+        raise ValueError(
+            "Case III hot-only lane missing non-deleted latest_summary rows for accounts: "
+            f"missing_count={missing_latest_count}, sample_keys={sample_keys}"
+        )
 
     latest_patch_base = (
         latest_ctx.join(peer_per_account, on=pk, how="inner")
@@ -1864,9 +1994,8 @@ def process_case_iii_using_latest_history_context(
 
     if older_count == 0:
         logger.info("Case III latest-history processing completed (latest-month only)")
-        return True
+        return
 
-    older_with_peer = backfill_all.filter(F.col(prt) < F.lit(global_latest_month))
     older_ctx = (
         older_with_peer.alias("c")
         .join(
@@ -2008,7 +2137,7 @@ def process_case_iii_using_latest_history_context(
             stage="case_3b_temp",
             expected_rows=expected_rows,
         )
-    return True
+    return
 
 
 def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], expected_rows: Optional[int] = None):
@@ -2039,162 +2168,74 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     pk = config['primary_column']
     split_enabled = bool(config.get("enable_case3_hot_cold_split", True))
     if split_enabled and not bool(config.get("_case3_split_internal", False)):
-        prt = config['partition_column']
-        hot_window = max(1, int(config.get("case3_hot_window_months", 36)))
-        split_df = case_iii_df
-        if "month_int" not in split_df.columns:
-            split_df = split_df.withColumn("month_int", F.expr(month_to_int_expr(prt)))
-
-        global_latest_month = (
-            split_df
-            .agg(F.max("max_existing_month").alias("global_latest_month"))
-            .first()["global_latest_month"]
+        hot_only_df, cold_complete_df, lane_metrics = _build_case3_hot_cold_lanes(case_iii_df, config)
+        hot_submetrics = _compute_hot_submetrics(hot_only_df, config)
+        logger.info(
+            "Case III routing metrics | "
+            f"total_rows={lane_metrics['total_rows']}, "
+            f"hot_candidate_rows={lane_metrics['hot_candidate_rows']}, "
+            f"cold_candidate_rows={lane_metrics['cold_candidate_rows']}, "
+            f"overlap_account_count={lane_metrics['overlap_account_count']}, "
+            f"hot_only_rows={lane_metrics['hot_only_rows']}, "
+            f"cold_complete_rows={lane_metrics['cold_complete_rows']}, "
+            f"hot_window_months={lane_metrics['hot_window_months']}, "
+            f"latest_month_rows={hot_submetrics['latest_month_rows']}, "
+            f"older_hot_rows={hot_submetrics['older_hot_rows']}"
         )
-        if global_latest_month is not None:
-            latest_int = int(global_latest_month[:4]) * 12 + int(global_latest_month[5:7])
-            hot_cutoff_int = latest_int - (hot_window - 1)
-            split_counts = (
-                split_df
-                .agg(
-                    F.sum(F.when(F.col("month_int") >= F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("hot_count"),
-                    F.sum(F.when(F.col("month_int") < F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("cold_count"),
-                )
-                .first()
+
+        split_case_tables = {
+            "execution_catalog.checkpointdb.case_3a": "case_3a_temp_split_combine",
+            "execution_catalog.checkpointdb.case_3b": "case_3b_temp_split_combine",
+            CASE3_LATEST_MONTH_PATCH_TABLE: "case_3_latest_month_patch_temp_split_combine",
+            CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE: "case_3_unified_latest_month_patch_temp_split_combine",
+            "execution_catalog.checkpointdb.case_3_latest_history_context_patch": "case_3_latest_history_context_patch_temp_split_combine",
+        }
+        snapshot_groups: List[Dict[str, str]] = []
+
+        hot_rows = lane_metrics["hot_only_rows"]
+        cold_rows = lane_metrics["cold_complete_rows"]
+
+        if hot_rows > 0:
+            drop_case_tables(spark, split_case_tables)
+            hot_cfg = dict(config)
+            hot_cfg["_case3_split_internal"] = True
+            hot_cfg["_case3_latest_month_patch_table"] = CASE3_LATEST_MONTH_PATCH_TABLE
+            _validate_hot_lane_latest_context(spark, hot_only_df, hot_cfg, lane_label="Case III")
+            process_case_iii_using_latest_history_context(
+                spark,
+                hot_only_df,
+                hot_cfg,
+                expected_rows=hot_rows,
             )
-            hot_count = int(split_counts["hot_count"] or 0)
-            cold_count = int(split_counts["cold_count"] or 0)
-            logger.info(
-                f"Case III split active for latest_month={global_latest_month} with hot_window={hot_window}"
+            snapshot_groups.append(
+                snapshot_case_tables(spark, split_case_tables, "hot_lane_case3")
             )
 
-            hot_df = split_df.filter(F.col("month_int") >= F.lit(hot_cutoff_int))
-            cold_df = split_df.filter(F.col("month_int") < F.lit(hot_cutoff_int))
-
-            has_account_overlap = False
-            overlap_accounts = None
-            if hot_count > 0 and cold_count > 0:
-                overlap_accounts = hot_df.select(pk).intersect(cold_df.select(pk)).distinct()
-                has_account_overlap = overlap_accounts.limit(1).count() > 0
-
-            force_unified_on_overlap = bool(config.get("force_case3_unified_on_any_overlap", False))
-            if has_account_overlap and force_unified_on_overlap:
-                logger.info(
-                    "Case III split safety fallback activated on overlap; using unified processing path"
-                )
-                unified_cfg = dict(config)
-                unified_cfg["_case3_split_internal"] = True
-                unified_cfg["use_latest_history_context_case3"] = False
-                unified_cfg["_case3_latest_month_patch_table"] = CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE
-                unified_cfg["force_cold_case3_broadcast"] = bool(
-                    config.get("force_cold_case3_broadcast", True)
-                )
-                process_case_iii(
-                    spark,
-                    split_df,
-                    unified_cfg,
-                    expected_rows=hot_count + cold_count,
-                )
-                return
-
-            if has_account_overlap:
-                mixed_df = split_df.join(overlap_accounts, on=pk, how="left_semi")
-                hot_only_df = hot_df.join(overlap_accounts, on=pk, how="left_anti")
-                cold_only_df = cold_df.join(overlap_accounts, on=pk, how="left_anti")
-                logger.info(
-                    "Case III split mode: account-level lanes active (mixed + hot-only + cold-only)"
-                )
-            else:
-                mixed_df = None
-                hot_only_df = hot_df
-                cold_only_df = cold_df
-                logger.info("Case III split mode: hot-only + cold-only lanes (no account overlap)")
-
-            split_case_tables = {
-                "execution_catalog.checkpointdb.case_3a": "case_3a_temp_split_combine",
-                "execution_catalog.checkpointdb.case_3b": "case_3b_temp_split_combine",
-                CASE3_LATEST_MONTH_PATCH_TABLE: "case_3_latest_month_patch_temp_split_combine",
-                CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE: "case_3_unified_latest_month_patch_temp_split_combine",
-                "execution_catalog.checkpointdb.case_3_latest_history_context_patch": "case_3_latest_history_context_patch_temp_split_combine",
-            }
-            snapshot_groups: List[Dict[str, str]] = []
-
-            if mixed_df is not None and not mixed_df.isEmpty():
-                drop_case_tables(spark, split_case_tables)
-                mixed_cfg = dict(config)
-                mixed_cfg["_case3_split_internal"] = True
-                mixed_cfg["use_latest_history_context_case3"] = False
-                mixed_cfg["_case3_latest_month_patch_table"] = CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE
-                mixed_cfg["force_cold_case3_broadcast"] = bool(
-                    config.get("force_cold_case3_broadcast", True)
-                )
-                process_case_iii(
-                    spark,
-                    mixed_df,
-                    mixed_cfg,
-                    expected_rows=hot_count + cold_count,
-                )
-                snapshot_groups.append(
-                    snapshot_case_tables(spark, split_case_tables, "mixed_lane_case3")
-                )
-
-            if hot_only_df is not None and not hot_only_df.isEmpty():
-                drop_case_tables(spark, split_case_tables)
-                hot_cfg = dict(config)
-                hot_cfg["_case3_split_internal"] = True
-                hot_cfg["use_latest_history_context_case3"] = True
-                hot_cfg["_case3_latest_month_patch_table"] = CASE3_LATEST_MONTH_PATCH_TABLE
-                hot_handled = process_case_iii_using_latest_history_context(
-                    spark,
-                    hot_only_df,
-                    hot_cfg,
-                    expected_rows=hot_count,
-                )
-                if not hot_handled:
-                    logger.info("Case III hot-only lane fell back to legacy processing")
-                    hot_fallback_cfg = dict(config)
-                    hot_fallback_cfg["_case3_split_internal"] = True
-                    hot_fallback_cfg["use_latest_history_context_case3"] = False
-                    process_case_iii(
-                        spark,
-                        hot_only_df,
-                        hot_fallback_cfg,
-                        expected_rows=hot_count,
-                    )
-                snapshot_groups.append(
-                    snapshot_case_tables(spark, split_case_tables, "hot_lane_case3")
-                )
-
-            if cold_only_df is not None and not cold_only_df.isEmpty():
-                drop_case_tables(spark, split_case_tables)
-                cold_cfg = dict(config)
-                cold_cfg["_case3_split_internal"] = True
-                cold_cfg["use_latest_history_context_case3"] = False
-                cold_cfg["_case3_latest_month_patch_table"] = CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE
-                cold_cfg["force_cold_case3_broadcast"] = bool(config.get("force_cold_case3_broadcast", True))
-                process_case_iii(
-                    spark,
-                    cold_only_df,
-                    cold_cfg,
-                    expected_rows=cold_count,
-                )
-                snapshot_groups.append(
-                    snapshot_case_tables(spark, split_case_tables, "cold_lane_case3")
-                )
-
-            combine_case_table_snapshots(
-                spark=spark,
-                config=config,
-                table_stage_map=split_case_tables,
-                snapshot_groups=snapshot_groups,
-                expected_rows=expected_rows,
+        if cold_rows > 0:
+            drop_case_tables(spark, split_case_tables)
+            cold_cfg = dict(config)
+            cold_cfg["_case3_split_internal"] = True
+            cold_cfg["_case3_latest_month_patch_table"] = CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE
+            cold_cfg["force_cold_case3_broadcast"] = bool(config.get("force_cold_case3_broadcast", True))
+            process_case_iii(
+                spark,
+                cold_complete_df,
+                cold_cfg,
+                expected_rows=cold_rows,
             )
-            cleanup_snapshot_tables(spark, snapshot_groups)
-            return
+            snapshot_groups.append(
+                snapshot_case_tables(spark, split_case_tables, "cold_complete_case3")
+            )
 
-    if config.get("use_latest_history_context_case3", True):
-        if process_case_iii_using_latest_history_context(spark, case_iii_df, config, expected_rows=expected_rows):
-            return
-        logger.info("Case III latest-history path fell back to legacy mode")
+        combine_case_table_snapshots(
+            spark=spark,
+            config=config,
+            table_stage_map=split_case_tables,
+            snapshot_groups=snapshot_groups,
+            expected_rows=expected_rows,
+        )
+        cleanup_snapshot_tables(spark, snapshot_groups)
+        return
 
     pk = config['primary_column']
     prt = config['partition_column']
@@ -2206,30 +2247,19 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     delete_codes_sql = ",".join([f"'{code}'" for code in SOFT_DELETE_CODES])
     case3_latest_patch_table = get_case3_latest_month_patch_table(config)
 
-    global_latest_month = (
-        case_iii_df
-        .agg(F.max("max_existing_month").alias("global_latest_month"))
-        .first()["global_latest_month"]
-    )
-    if global_latest_month is None:
-        logger.info("Case III skipped: no existing latest month metadata available")
-        return
+    split_df = case_iii_df
+    if "month_int" not in split_df.columns:
+        split_df = split_df.withColumn("month_int", F.expr(month_to_int_expr(prt)))
+    if "max_month_int" not in split_df.columns:
+        raise ValueError("Case III processing requires max_month_int in classified dataframe")
 
-    case_iii_latest_df = case_iii_df.filter(F.col(prt) == F.lit(global_latest_month))
-    case_iii_older_df = case_iii_df.filter(F.col(prt) < F.lit(global_latest_month))
+    case_iii_latest_df = split_df.filter(F.col("month_int") == F.col("max_month_int"))
+    case_iii_older_df = split_df.filter(F.col("month_int") < F.col("max_month_int"))
 
-    split_counts = (
-        case_iii_df
-        .agg(
-            F.sum(F.when(F.col(prt) == F.lit(global_latest_month), F.lit(1)).otherwise(F.lit(0))).alias("latest_count"),
-            F.sum(F.when(F.col(prt) < F.lit(global_latest_month), F.lit(1)).otherwise(F.lit(0))).alias("older_count"),
-        )
-        .first()
-    )
-    latest_count = int(split_counts["latest_count"] or 0)
-    older_count = int(split_counts["older_count"] or 0)
+    latest_count = int(case_iii_latest_df.count() or 0)
+    older_count = int(case_iii_older_df.count() or 0)
     logger.info(
-        f"Case III split by month: latest_month={global_latest_month}, "
+        "Case III latest/older split (per-row) | "
         f"latest_rows={latest_count:,}, older_rows={older_count:,}"
     )
 
@@ -2694,16 +2724,15 @@ def process_case_iii_soft_delete_using_latest_history_context(
     case_iii_delete_df,
     config: Dict[str, Any],
     expected_rows: Optional[int] = None,
-) -> bool:
+) -> None:
     """
     Hot-lane soft-delete processing using latest_summary history context.
 
     This path avoids broad summary range scans by deriving future-month patches from
-    latest_summary context for touched accounts. Returns False when context is not
-    usable, so caller can fall back to legacy behavior safely.
+    latest_summary context for touched accounts.
     """
     if case_iii_delete_df is None or case_iii_delete_df.isEmpty():
-        return True
+        return
 
     pk = config['primary_column']
     prt = config['partition_column']
@@ -2719,10 +2748,7 @@ def process_case_iii_soft_delete_using_latest_history_context(
     case3d_latest_history_patch_table = get_case3d_latest_history_patch_table(config)
 
     if not all(c in latest_cols for c in history_cols):
-        logger.info(
-            "Case III Soft Delete latest-context path unavailable: latest_summary missing required history columns"
-        )
-        return False
+        raise ValueError("Case III soft-delete hot-only lane requires *_history columns in latest_summary")
 
     delete_df = case_iii_delete_df.withColumn("delete_month_int", F.expr(month_to_int_expr(prt)))
     affected_accounts = delete_df.select(pk).distinct()
@@ -2735,8 +2761,19 @@ def process_case_iii_soft_delete_using_latest_history_context(
     )
 
     if latest_ctx.isEmpty():
-        logger.info("Case III Soft Delete latest-context path unavailable: no matching latest_summary rows")
-        return False
+        raise ValueError("Case III soft-delete hot-only lane has no matching latest_summary context rows")
+
+    missing_latest_accounts = (
+        affected_accounts
+        .join(latest_ctx.select(pk).distinct(), on=pk, how="left_anti")
+    )
+    missing_latest_count = int(missing_latest_accounts.count() or 0)
+    if missing_latest_count > 0:
+        sample_keys = [int(r[pk]) for r in missing_latest_accounts.limit(10).collect()]
+        raise ValueError(
+            "Case III soft-delete hot-only lane missing latest_summary rows for accounts: "
+            f"missing_count={missing_latest_count}, sample_keys={sample_keys}"
+        )
 
     # Keep only delete rows that already exist in summary month table.
     delete_months = delete_df.select(prt).distinct()
@@ -2757,7 +2794,7 @@ def process_case_iii_soft_delete_using_latest_history_context(
 
     if delete_existing.isEmpty():
         logger.info("No existing summary rows matched soft-delete records; nothing to update")
-        return True
+        return
 
     # Part A: month-row flag updates (soft_del_cd + base_ts only)
     delete_month_update_df = delete_existing.select(
@@ -2953,7 +2990,7 @@ def process_case_iii_soft_delete_using_latest_history_context(
         )
         logger.info(f"Case III Soft Delete - Latest history patches generated (context path): {case3d_latest_history_patch_table}")
 
-    return True
+    return
 
 
 def process_case_iii_soft_delete(
@@ -2981,187 +3018,97 @@ def process_case_iii_soft_delete(
     pk = config['primary_column']
     case3d_latest_history_patch_table = get_case3d_latest_history_patch_table(config)
 
-    # Split soft-delete lane by month recency:
-    # hot path uses latest_summary context-aware processing,
-    # cold path falls back to legacy summary-scan processing.
     split_enabled = bool(config.get("enable_case3_hot_cold_split", True))
     if split_enabled and not bool(config.get("_case3d_split_internal", False)):
-        prt = config['partition_column']
-        hot_window = max(1, int(config.get("case3_hot_window_months", 36)))
-        split_df = case_iii_delete_df
-        if "month_int" not in split_df.columns:
-            split_df = split_df.withColumn("month_int", F.expr(month_to_int_expr(prt)))
-
-        global_latest_month = (
-            split_df
-            .agg(F.max("max_existing_month").alias("global_latest_month"))
-            .first()["global_latest_month"]
+        hot_only_df, cold_complete_df, lane_metrics = _build_case3_hot_cold_lanes(case_iii_delete_df, config)
+        hot_submetrics = _compute_hot_submetrics(hot_only_df, config)
+        logger.info(
+            "Case III soft-delete routing metrics | "
+            f"total_rows={lane_metrics['total_rows']}, "
+            f"hot_candidate_rows={lane_metrics['hot_candidate_rows']}, "
+            f"cold_candidate_rows={lane_metrics['cold_candidate_rows']}, "
+            f"overlap_account_count={lane_metrics['overlap_account_count']}, "
+            f"hot_only_rows={lane_metrics['hot_only_rows']}, "
+            f"cold_complete_rows={lane_metrics['cold_complete_rows']}, "
+            f"hot_window_months={lane_metrics['hot_window_months']}, "
+            f"latest_month_rows={hot_submetrics['latest_month_rows']}, "
+            f"older_hot_rows={hot_submetrics['older_hot_rows']}"
         )
-        if global_latest_month is not None:
-            latest_int = int(global_latest_month[:4]) * 12 + int(global_latest_month[5:7])
-            hot_cutoff_int = latest_int - (hot_window - 1)
-            split_counts = (
-                split_df
-                .agg(
-                    F.sum(F.when(F.col("month_int") >= F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("hot_count"),
-                    F.sum(F.when(F.col("month_int") < F.lit(hot_cutoff_int), F.lit(1)).otherwise(F.lit(0))).alias("cold_count"),
-                )
-                .first()
+
+        split_case_tables = {
+            "execution_catalog.checkpointdb.case_3d_month": "case_3d_month_temp_split_combine",
+            "execution_catalog.checkpointdb.case_3d_future": "case_3d_future_temp_split_combine",
+            CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE: "case_3d_latest_history_context_patch_temp_split_combine",
+            CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE: "case_3d_unified_latest_history_patch_temp_split_combine",
+        }
+        snapshot_groups: List[Dict[str, str]] = []
+
+        hot_rows = lane_metrics["hot_only_rows"]
+        cold_rows = lane_metrics["cold_complete_rows"]
+
+        if hot_rows > 0:
+            drop_case_tables(spark, split_case_tables)
+            hot_cfg = dict(config)
+            hot_cfg["_case3d_split_internal"] = True
+            hot_cfg["_case3d_latest_history_patch_table"] = CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE
+            _validate_hot_lane_latest_context(spark, hot_only_df, hot_cfg, lane_label="Case III soft-delete")
+            process_case_iii_soft_delete_using_latest_history_context(
+                spark,
+                hot_only_df,
+                hot_cfg,
+                expected_rows=hot_rows,
             )
-            hot_count = int(split_counts["hot_count"] or 0)
-            cold_count = int(split_counts["cold_count"] or 0)
-            logger.info(
-                f"Case III soft-delete split active for latest_month={global_latest_month} with hot_window={hot_window}"
+            snapshot_groups.append(
+                snapshot_case_tables(spark, split_case_tables, "hot_lane_case3d")
             )
 
-            hot_df = split_df.filter(F.col("month_int") >= F.lit(hot_cutoff_int))
-            cold_df = split_df.filter(F.col("month_int") < F.lit(hot_cutoff_int))
-
-            has_account_overlap = False
-            overlap_accounts = None
-            if hot_count > 0 and cold_count > 0:
-                overlap_accounts = hot_df.select(pk).intersect(cold_df.select(pk)).distinct()
-                has_account_overlap = overlap_accounts.limit(1).count() > 0
-
-            force_unified_on_overlap = bool(config.get("force_case3d_unified_on_any_overlap", False))
-            if has_account_overlap and force_unified_on_overlap:
-                logger.info(
-                    "Case III soft-delete split safety fallback activated on overlap; using unified processing path"
+        if cold_rows > 0:
+            drop_case_tables(spark, split_case_tables)
+            cold_cfg = dict(config)
+            cold_cfg["_case3d_split_internal"] = True
+            cold_cfg["_case3d_latest_history_patch_table"] = CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE
+            force_cold_case3d_broadcast = bool(
+                config.get(
+                    "force_cold_case3d_broadcast",
+                    config.get("force_cold_case3_broadcast", True),
                 )
-                unified_cfg = dict(config)
-                unified_cfg["_case3d_split_internal"] = True
-                unified_cfg["use_latest_history_context_case3d"] = False
-                unified_cfg["_case3d_latest_history_patch_table"] = CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE
-                process_case_iii_soft_delete(
-                    spark,
-                    split_df,
-                    unified_cfg,
-                    expected_rows=hot_count + cold_count,
-                )
-                return
-
-            if has_account_overlap:
-                mixed_df = split_df.join(overlap_accounts, on=pk, how="left_semi")
-                hot_only_df = hot_df.join(overlap_accounts, on=pk, how="left_anti")
-                cold_only_df = cold_df.join(overlap_accounts, on=pk, how="left_anti")
-                logger.info(
-                    "Case III soft-delete split mode: account-level lanes active (mixed + hot-only + cold-only)"
-                )
-            else:
-                mixed_df = None
-                hot_only_df = hot_df
-                cold_only_df = cold_df
-                logger.info("Case III soft-delete split mode: hot-only + cold-only lanes (no account overlap)")
-
-            split_case_tables = {
-                "execution_catalog.checkpointdb.case_3d_month": "case_3d_month_temp_split_combine",
-                "execution_catalog.checkpointdb.case_3d_future": "case_3d_future_temp_split_combine",
-                CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE: "case_3d_latest_history_context_patch_temp_split_combine",
-                CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE: "case_3d_unified_latest_history_patch_temp_split_combine",
-            }
-            snapshot_groups: List[Dict[str, str]] = []
-
-            if mixed_df is not None and not mixed_df.isEmpty():
-                drop_case_tables(spark, split_case_tables)
-                mixed_cfg = dict(config)
-                mixed_cfg["_case3d_split_internal"] = True
-                mixed_cfg["use_latest_history_context_case3d"] = False
-                mixed_cfg["_case3d_latest_history_patch_table"] = CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE
-                process_case_iii_soft_delete(
-                    spark,
-                    mixed_df,
-                    mixed_cfg,
-                    expected_rows=hot_count + cold_count,
-                )
-                snapshot_groups.append(
-                    snapshot_case_tables(spark, split_case_tables, "mixed_lane_case3d")
-                )
-
-            if hot_only_df is not None and not hot_only_df.isEmpty():
-                drop_case_tables(spark, split_case_tables)
-                hot_cfg = dict(config)
-                hot_cfg["_case3d_split_internal"] = True
-                hot_cfg["use_latest_history_context_case3d"] = True
-                hot_cfg["_case3d_latest_history_patch_table"] = CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE
-                hot_handled = process_case_iii_soft_delete_using_latest_history_context(
-                    spark,
-                    hot_only_df,
-                    hot_cfg,
-                    expected_rows=hot_count,
-                )
-                if not hot_handled:
-                    logger.info("Case III soft-delete hot-only lane fell back to legacy processing")
-                    hot_fallback_cfg = dict(config)
-                    hot_fallback_cfg["_case3d_split_internal"] = True
-                    hot_fallback_cfg["use_latest_history_context_case3d"] = False
-                    process_case_iii_soft_delete(
-                        spark,
-                        hot_only_df,
-                        hot_fallback_cfg,
-                        expected_rows=hot_count,
-                    )
-                snapshot_groups.append(
-                    snapshot_case_tables(spark, split_case_tables, "hot_lane_case3d")
-                )
-
-            if cold_only_df is not None and not cold_only_df.isEmpty():
-                drop_case_tables(spark, split_case_tables)
-                cold_cfg = dict(config)
-                cold_cfg["_case3d_split_internal"] = True
-                cold_cfg["use_latest_history_context_case3d"] = False
-                cold_cfg["_case3d_latest_history_patch_table"] = CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE
-                force_cold_case3d_broadcast = bool(
+            )
+            cold_lane_df = cold_complete_df
+            if force_cold_case3d_broadcast:
+                row_cap = int(
                     config.get(
-                        "force_cold_case3d_broadcast",
-                        config.get("force_cold_case3_broadcast", True),
+                        "cold_case3d_broadcast_row_cap",
+                        config.get("cold_case3_broadcast_row_cap", 10_000_000),
                     )
                 )
-                cold_lane_df = cold_only_df
-                if force_cold_case3d_broadcast:
-                    row_cap = int(
-                        config.get(
-                            "cold_case3d_broadcast_row_cap",
-                            config.get("cold_case3_broadcast_row_cap", 10_000_000),
-                        )
+                if cold_rows > row_cap:
+                    raise ValueError(
+                        f"Cold Case III soft-delete broadcast guard failed: "
+                        f"cold rows exceed cap={row_cap:,}"
                     )
-                    if cold_count > row_cap:
-                        raise ValueError(
-                            f"Cold Case III soft-delete broadcast guard failed: "
-                            f"cold rows exceed cap={row_cap:,}"
-                        )
-                    cold_lane_df = F.broadcast(cold_only_df)
-                    logger.info(
-                        f"Forced broadcast enabled for cold Case III soft-delete input (cap={row_cap:,})"
-                    )
-                process_case_iii_soft_delete(
-                    spark,
-                    cold_lane_df,
-                    cold_cfg,
-                    expected_rows=cold_count,
+                cold_lane_df = F.broadcast(cold_complete_df)
+                logger.info(
+                    f"Forced broadcast enabled for cold Case III soft-delete input (cap={row_cap:,})"
                 )
-                snapshot_groups.append(
-                    snapshot_case_tables(spark, split_case_tables, "cold_lane_case3d")
-                )
-
-            combine_case_table_snapshots(
-                spark=spark,
-                config=config,
-                table_stage_map=split_case_tables,
-                snapshot_groups=snapshot_groups,
-                expected_rows=expected_rows,
+            process_case_iii_soft_delete(
+                spark,
+                cold_lane_df,
+                cold_cfg,
+                expected_rows=cold_rows,
             )
-            cleanup_snapshot_tables(spark, snapshot_groups)
-            return
+            snapshot_groups.append(
+                snapshot_case_tables(spark, split_case_tables, "cold_complete_case3d")
+            )
 
-    if config.get("use_latest_history_context_case3d", True):
-        if process_case_iii_soft_delete_using_latest_history_context(
-            spark,
-            case_iii_delete_df,
-            config,
+        combine_case_table_snapshots(
+            spark=spark,
+            config=config,
+            table_stage_map=split_case_tables,
+            snapshot_groups=snapshot_groups,
             expected_rows=expected_rows,
-        ):
-            return
-        logger.info("Case III soft-delete latest-context path fell back to legacy mode")
+        )
+        cleanup_snapshot_tables(spark, snapshot_groups)
+        return
 
     prt = config['partition_column']
     ts = config['max_identifier_column']

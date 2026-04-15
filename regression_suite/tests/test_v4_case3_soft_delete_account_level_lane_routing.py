@@ -38,7 +38,6 @@ def test_v4_case3_soft_delete_account_level_lane_routing():
     config["validate_latest_history_window"] = True
     config["enable_case3_hot_cold_split"] = True
     config["case3_hot_window_months"] = 36
-    config["force_case3d_unified_on_any_overlap"] = False
     config["force_cold_case3d_broadcast"] = True
     config["cold_case3d_broadcast_row_cap"] = 10_000_000
 
@@ -168,4 +167,3 @@ def test_v4_case3_soft_delete_account_level_lane_routing():
 if __name__ == "__main__":
     test_v4_case3_soft_delete_account_level_lane_routing()
     print("[PASS] test_v4_case3_soft_delete_account_level_lane_routing.py")
-
