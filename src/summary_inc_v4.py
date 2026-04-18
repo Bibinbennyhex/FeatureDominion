@@ -32,8 +32,6 @@ SNAPSHOT_INTERVAL = 12
 MAX_FILE_SIZE = 256
 HISTORY_LENGTH = 36
 CASE_TEMP_BUCKET_COUNT = 64
-CASE3_LATEST_MONTH_PATCH_TABLE = "execution_catalog.checkpointdb.case_3_latest_month_patch"
-CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE = "execution_catalog.checkpointdb.case_3_unified_latest_month_patch"
 CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE = "execution_catalog.checkpointdb.case_3d_latest_history_context_patch"
 CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE = "execution_catalog.checkpointdb.case_3d_unified_latest_history_patch"
 TRACKER_SOURCE_SUMMARY = "summary"
@@ -656,10 +654,6 @@ def get_latest_cols(config: Dict[str, Any]) -> List[str]:
         raise ValueError("latest_summary_cols missing from runtime cache; call preload_run_table_columns first")
     return runtime_cache["latest_summary_cols"]
 
-def get_case3_latest_month_patch_table(config: Dict[str, Any]) -> str:
-    return config.get("_case3_latest_month_patch_table", CASE3_LATEST_MONTH_PATCH_TABLE)
-
-
 def get_case3d_latest_history_patch_table(config: Dict[str, Any]) -> str:
     return config.get("_case3d_latest_history_patch_table", CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE)
 
@@ -1061,7 +1055,7 @@ def _compute_hot_submetrics(
     config: Dict[str, Any],
 ) -> Dict[str, int]:
     if hot_df is None or hot_df.isEmpty():
-        return {"latest_month_rows": 0, "older_hot_rows": 0}
+        return {"head_rows": 0, "older_hot_rows": 0}
 
     prt = config["partition_column"]
     metric_df = hot_df
@@ -1073,13 +1067,13 @@ def _compute_hot_submetrics(
     counts = (
         metric_df
         .agg(
-            F.sum(F.when(F.col("month_int") == F.col("max_month_int"), F.lit(1)).otherwise(F.lit(0))).alias("latest_month_rows"),
+            F.sum(F.when(F.col("month_int") == F.col("max_month_int"), F.lit(1)).otherwise(F.lit(0))).alias("head_rows"),
             F.sum(F.when(F.col("month_int") < F.col("max_month_int"), F.lit(1)).otherwise(F.lit(0))).alias("older_hot_rows"),
         )
         .first()
     )
     return {
-        "latest_month_rows": int(counts["latest_month_rows"] or 0),
+        "head_rows": int(counts["head_rows"] or 0),
         "older_hot_rows": int(counts["older_hot_rows"] or 0),
     }
 
@@ -1791,10 +1785,7 @@ def process_case_iii_using_latest_history_context(
     config: Dict[str, Any],
     expected_rows: Optional[int] = None,
 ) -> None:
-    """
-    Build Case III rolling arrays from latest_summary history arrays.
-    This is the canonical hot-lane path (no legacy fallback).
-    """
+    """Build Case III rolling arrays from latest_summary history arrays for hot rows."""
     pk = config['primary_column']
     prt = config['partition_column']
     ts = config['max_identifier_column']
@@ -1804,7 +1795,6 @@ def process_case_iii_using_latest_history_context(
     latest_history_len = get_latest_history_len(config)
     rolling_columns = config.get('rolling_columns', [])
     grid_columns = config.get('grid_columns', [])
-    case3_latest_patch_table = get_case3_latest_month_patch_table(config)
 
     if case_iii_df is None or case_iii_df.isEmpty():
         return
@@ -1821,46 +1811,6 @@ def process_case_iii_using_latest_history_context(
     if "max_month_int" not in split_df.columns:
         raise ValueError("Case III hot-only lane requires max_month_int in classified dataframe")
 
-    case_iii_latest_df = split_df.filter(F.col("month_int") == F.col("max_month_int"))
-    latest_count = int(case_iii_latest_df.count() or 0)
-
-    # Keep latest-month patch behavior for summary table (index-0 update on current latest month rows).
-    if latest_count > 0:
-        latest_dedupe_window = Window.partitionBy(pk, prt).orderBy(F.col(ts).desc())
-        case_iii_latest_dedup = (
-            case_iii_latest_df
-            .withColumn("_rn", F.row_number().over(latest_dedupe_window))
-            .filter(F.col("_rn") == 1)
-            .drop("_rn")
-        )
-        temp_exclusions = {
-            "month_int", "max_existing_month", "max_existing_ts", "max_month_int",
-            "_is_soft_delete", "case_type", "MONTH_DIFF", "min_month_for_new_account",
-            "count_months_for_new_account",
-        }
-        latest_source_cols = [
-            c for c in case_iii_latest_dedup.columns
-            if c not in temp_exclusions and not c.startswith("_prepared_")
-        ]
-        latest_value_cols = [
-            F.col(rc['mapper_column']).alias(f"latest_val_{rc['name']}")
-            for rc in rolling_columns
-        ]
-        latest_patch_df = case_iii_latest_dedup.select(
-            *[F.col(c) for c in latest_source_cols],
-            *latest_value_cols,
-        )
-        write_case_table_bucketed(
-            spark=spark,
-            df=latest_patch_df,
-            table_name=case3_latest_patch_table,
-            config=config,
-            stage=f"{case3_latest_patch_table.split('.')[-1]}_temp",
-            expected_rows=latest_count,
-        )
-        logger.info(f"Case III latest-month patch table generated: {case3_latest_patch_table}")
-
-    # Build peer map for all Case III rows (latest + older) for overwrite precedence.
     backfill_all = split_df
     val_struct_fields = []
     for rc in rolling_columns:
@@ -1875,11 +1825,11 @@ def process_case_iii_using_latest_history_context(
             ).over(peer_window)
         )
     )
-    older_with_peer = backfill_all.filter(F.col("month_int") < F.col("max_month_int"))
-    older_count = int(older_with_peer.count() or 0)
+    head_count = int(backfill_all.filter(F.col("month_int") == F.col("max_month_int")).count() or 0)
+    older_count = int(backfill_all.filter(F.col("month_int") < F.col("max_month_int")).count() or 0)
     logger.info(
-        "Case III latest-history path selected | "
-        f"latest_rows={latest_count}, older_rows={older_count}"
+        "Case III hot lane selected | "
+        f"head_rows={head_count}, older_hot_rows={older_count}"
     )
     peer_per_account = backfill_all.select(pk, "peer_map").dropDuplicates([pk])
 
@@ -1992,19 +1942,15 @@ def process_case_iii_using_latest_history_context(
         expected_rows=expected_rows,
     )
 
-    if older_count == 0:
-        logger.info("Case III latest-history processing completed (latest-month only)")
-        return
-
-    older_ctx = (
-        older_with_peer.alias("c")
+    hot_ctx = (
+        backfill_all.alias("c")
         .join(
             latest_ctx.select(pk, "latest_month_int", *history_cols).alias("l"),
             on=pk,
             how="inner",
         )
     )
-    older_ctx.createOrReplaceTempView("case3_older_ctx")
+    hot_ctx.createOrReplaceTempView("case3_hot_ctx")
 
     exclude_backfill = {
         "month_int", "max_existing_month", "max_existing_ts", "max_month_int",
@@ -2036,7 +1982,7 @@ def process_case_iii_using_latest_history_context(
         SELECT
             {', '.join(base_cols)},
             {', '.join(case3a_exprs)}
-        FROM case3_older_ctx c
+        FROM case3_hot_ctx c
     """
     case3a_df = spark.sql(case3a_sql)
     for gc in grid_columns:
@@ -2179,15 +2125,13 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
             f"hot_only_rows={lane_metrics['hot_only_rows']}, "
             f"cold_complete_rows={lane_metrics['cold_complete_rows']}, "
             f"hot_window_months={lane_metrics['hot_window_months']}, "
-            f"latest_month_rows={hot_submetrics['latest_month_rows']}, "
+            f"head_rows={hot_submetrics['head_rows']}, "
             f"older_hot_rows={hot_submetrics['older_hot_rows']}"
         )
 
         split_case_tables = {
             "execution_catalog.checkpointdb.case_3a": "case_3a_temp_split_combine",
             "execution_catalog.checkpointdb.case_3b": "case_3b_temp_split_combine",
-            CASE3_LATEST_MONTH_PATCH_TABLE: "case_3_latest_month_patch_temp_split_combine",
-            CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE: "case_3_unified_latest_month_patch_temp_split_combine",
             "execution_catalog.checkpointdb.case_3_latest_history_context_patch": "case_3_latest_history_context_patch_temp_split_combine",
         }
         snapshot_groups: List[Dict[str, str]] = []
@@ -2199,7 +2143,6 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
             drop_case_tables(spark, split_case_tables)
             hot_cfg = dict(config)
             hot_cfg["_case3_split_internal"] = True
-            hot_cfg["_case3_latest_month_patch_table"] = CASE3_LATEST_MONTH_PATCH_TABLE
             _validate_hot_lane_latest_context(spark, hot_only_df, hot_cfg, lane_label="Case III")
             process_case_iii_using_latest_history_context(
                 spark,
@@ -2215,7 +2158,6 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
             drop_case_tables(spark, split_case_tables)
             cold_cfg = dict(config)
             cold_cfg["_case3_split_internal"] = True
-            cold_cfg["_case3_latest_month_patch_table"] = CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE
             cold_cfg["force_cold_case3_broadcast"] = bool(config.get("force_cold_case3_broadcast", True))
             process_case_iii(
                 spark,
@@ -2245,7 +2187,6 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     rolling_columns = config.get('rolling_columns', [])
     grid_columns = config.get('grid_columns', [])
     delete_codes_sql = ",".join([f"'{code}'" for code in SOFT_DELETE_CODES])
-    case3_latest_patch_table = get_case3_latest_month_patch_table(config)
 
     split_df = case_iii_df
     if "month_int" not in split_df.columns:
@@ -2253,84 +2194,29 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     if "max_month_int" not in split_df.columns:
         raise ValueError("Case III processing requires max_month_int in classified dataframe")
 
-    case_iii_latest_df = split_df.filter(F.col("month_int") == F.col("max_month_int"))
-    case_iii_older_df = split_df.filter(F.col("month_int") < F.col("max_month_int"))
-
-    latest_count = int(case_iii_latest_df.count() or 0)
-    older_count = int(case_iii_older_df.count() or 0)
+    case_iii_backfill_df = split_df
+    head_count = int(case_iii_backfill_df.filter(F.col("month_int") == F.col("max_month_int")).count() or 0)
+    older_count = int(case_iii_backfill_df.filter(F.col("month_int") < F.col("max_month_int")).count() or 0)
+    total_count = head_count + older_count
     logger.info(
-        "Case III latest/older split (per-row) | "
-        f"latest_rows={latest_count:,}, older_rows={older_count:,}"
+        "Case III cold lane profile (per-row) | "
+        f"total_rows={total_count:,}, head_rows={head_count:,}, older_rows={older_count:,}"
     )
 
     if bool(config.get("force_cold_case3_broadcast", False)) and older_count > 0:
         row_cap = int(config.get("cold_case3_broadcast_row_cap", 10_000_000))
-        if older_count > row_cap:
+        if total_count > row_cap:
             raise ValueError(
-                f"Cold Case III broadcast guard failed: older_rows={older_count:,} exceeds cap={row_cap:,}"
+                f"Cold Case III broadcast guard failed: total_rows={total_count:,} exceeds cap={row_cap:,}"
             )
-        case_iii_older_df = F.broadcast(case_iii_older_df)
-        logger.info(f"Forced broadcast enabled for cold Case III input (rows={older_count:,}, cap={row_cap:,})")
-
-    if latest_count > 0:
-        logger.info("Case III Part 2: building latest-month patch rows")
-        latest_dedupe_window = Window.partitionBy(pk, prt).orderBy(F.col(ts).desc())
-        case_iii_latest_dedup = (
-            case_iii_latest_df
-            .withColumn("_rn", F.row_number().over(latest_dedupe_window))
-            .filter(F.col("_rn") == 1)
-            .drop("_rn")
-        )
-
-        temp_exclusions = {
-            "month_int",
-            "max_existing_month",
-            "max_existing_ts",
-            "max_month_int",
-            "_is_soft_delete",
-            "case_type",
-            "MONTH_DIFF",
-            "min_month_for_new_account",
-            "count_months_for_new_account",
-        }
-        latest_source_cols = [
-            c for c in case_iii_latest_dedup.columns
-            if c not in temp_exclusions and not c.startswith("_prepared_")
-        ]
-
-        latest_value_cols = [
-            F.col(rc['mapper_column']).alias(f"latest_val_{rc['name']}")
-            for rc in rolling_columns
-        ]
-
-        latest_patch_df = case_iii_latest_dedup.select(
-            *[F.col(c) for c in latest_source_cols],
-            *latest_value_cols,
-        )
-
-        write_case_table_bucketed(
-            spark=spark,
-            df=latest_patch_df,
-            table_name=case3_latest_patch_table,
-            config=config,
-            stage=f"{case3_latest_patch_table.split('.')[-1]}_temp",
-            expected_rows=latest_count,
-        )
-        logger.info(f"Case III Part 2 generated: {case3_latest_patch_table}")
-        logger.info("-" * 60)
-    else:
-        logger.info("Case III Part 2 skipped: no latest-month rows")
-        logger.info("-" * 60)
-
-    if older_count == 0:
-        logger.info("Case III Part 1 skipped: no older-month backfill rows")
-        return
+        case_iii_backfill_df = F.broadcast(case_iii_backfill_df)
+        logger.info(f"Forced broadcast enabled for cold Case III input (rows={total_count:,}, cap={row_cap:,})")
 
     # Get affected accounts
-    affected_accounts = case_iii_older_df.select(pk).distinct()
+    affected_accounts = case_iii_backfill_df.select(pk).distinct()
 
     # Get the min/max backfill months to calculate partition range
-    backfill_range = case_iii_older_df.agg(
+    backfill_range = case_iii_backfill_df.agg(
         F.min(prt).alias("min_backfill_month"),
         F.max(prt).alias("max_backfill_month")
     ).first()
@@ -2359,11 +2245,11 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
     earliest_partition = f"{earliest_year}-{earliest_month:02d}"
 
     latest_year = latest_needed_int // 12
-    latest_month = latest_needed_int % 12
-    if latest_month == 0:
-        latest_month = 12
+    latest_partition_month = latest_needed_int % 12
+    if latest_partition_month == 0:
+        latest_partition_month = 12
         latest_year -= 1
-    latest_partition = f"{latest_year}-{latest_month:02d}"
+    latest_partition = f"{latest_year}-{latest_partition_month:02d}"
 
     logger.info(f"Reading summary partitions from {earliest_partition} to {latest_partition}")
 
@@ -2402,7 +2288,7 @@ def process_case_iii(spark: SparkSession, case_iii_df, config: Dict[str, Any], e
         val_struct_fields.append(F.col(mapper_column).alias(f"val_{rc['name']}"))
 
     peer_window = Window.partitionBy(pk)
-    case_iii_with_peers = case_iii_older_df.withColumn(
+    case_iii_with_peers = case_iii_backfill_df.withColumn(
         "peer_map", 
         F.map_from_entries(
             F.collect_list(
@@ -3031,7 +2917,7 @@ def process_case_iii_soft_delete(
             f"hot_only_rows={lane_metrics['hot_only_rows']}, "
             f"cold_complete_rows={lane_metrics['cold_complete_rows']}, "
             f"hot_window_months={lane_metrics['hot_window_months']}, "
-            f"latest_month_rows={hot_submetrics['latest_month_rows']}, "
+            f"head_rows={hot_submetrics['head_rows']}, "
             f"older_hot_rows={hot_submetrics['older_hot_rows']}"
         )
 
@@ -3145,11 +3031,11 @@ def process_case_iii_soft_delete(
     earliest_partition = f"{earliest_year}-{earliest_month:02d}"
 
     latest_year = latest_needed_int // 12
-    latest_month = latest_needed_int % 12
-    if latest_month == 0:
-        latest_month = 12
+    latest_partition_month = latest_needed_int % 12
+    if latest_partition_month == 0:
+        latest_partition_month = 12
         latest_year -= 1
-    latest_partition = f"{latest_year}-{latest_month:02d}"
+    latest_partition = f"{latest_year}-{latest_partition_month:02d}"
 
     summary_filtered = (
         spark.sql(
@@ -3603,10 +3489,6 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
     grid_columns = config.get('grid_columns', [])
     history_cols = [f"{rc['name']}_history" for rc in rolling_columns]
     grid_cols = [gc['name'] for gc in grid_columns]
-    case3_latest_month_patch_tables = [
-        CASE3_LATEST_MONTH_PATCH_TABLE,
-        CASE3_UNIFIED_LATEST_MONTH_PATCH_TABLE,
-    ]
     case3d_latest_history_patch_tables = [
         CASE3D_LATEST_HISTORY_CONTEXT_PATCH_TABLE,
         CASE3D_UNIFIED_LATEST_HISTORY_PATCH_TABLE,
@@ -3619,7 +3501,6 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
 
         case_3a_df = None
         case_3b_filtered_df = None
-        case_3_latest_month_patch_df = None
         case_3d_month_df = None
         case_3d_future_df = None
         case_3d_latest_history_patch_df = None
@@ -3650,7 +3531,6 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
         if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3d_future"):
             case_3d_future_df = spark.read.table("execution_catalog.checkpointdb.case_3d_future")
 
-        case_3_latest_month_patch_df = _read_union_if_exists(case3_latest_month_patch_tables)
         case_3d_latest_history_patch_df = _read_union_if_exists(case3d_latest_history_patch_tables)
 
         if case_3a_df is not None or case_3b_filtered_df is not None:
@@ -3793,85 +3673,6 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
         process_total_minutes = (process_end_time - process_start_time) / 60
         logger.info(f"Updated Summary | MERGED - CASE III-B (future summary rows with backfill data) | Time Elapsed: {process_total_minutes:.2f} minutes")
         logger.info("-" * 60)
-
-        process_start_time = time.time()
-        if case_3_latest_month_patch_df is not None:
-            latest_value_cols = [f"latest_val_{rc['name']}" for rc in rolling_columns]
-            summary_cols_set = set(get_summary_cols(config))
-
-            scalar_update_cols = [
-                c for c in case_3_latest_month_patch_df.columns
-                if c in summary_cols_set
-                and c not in set([pk, prt, ts] + history_cols + grid_cols + latest_value_cols)
-            ]
-
-            history_update_sql_map: Dict[str, str] = {}
-            for rc in rolling_columns:
-                array_name = f"{rc['name']}_history"
-                latest_val_col = f"latest_val_{rc['name']}"
-                data_type = rc.get('type', rc.get('data_type', 'String'))
-                history_update_sql_map[array_name] = (
-                    f"transform(s.{array_name}, (x, i) -> CASE "
-                    f"WHEN i = 0 THEN CAST(c.{latest_val_col} AS {data_type.upper()}) "
-                    f"ELSE x END)"
-                )
-
-            update_set_exprs = [f"s.{ts} = GREATEST(s.{ts}, c.{ts})"]
-            for col_name in scalar_update_cols:
-                update_set_exprs.append(f"s.{col_name} = c.{col_name}")
-            for array_name in history_cols:
-                update_set_exprs.append(f"s.{array_name} = {history_update_sql_map[array_name]}")
-
-            for gc in grid_columns:
-                source_rolling = gc.get('mapper_rolling_column', gc.get('source_history', ''))
-                source_history = f"{source_rolling}_history"
-                placeholder = gc.get('placeholder', '?').replace("'", "''")
-                separator = gc.get('seperator', gc.get('separator', '')).replace("'", "''")
-                source_expr = history_update_sql_map.get(source_history, f"s.{source_history}")
-                grid_expr = (
-                    f"concat_ws('{separator}', "
-                    f"transform({source_expr}, x -> coalesce(cast(x as string), '{placeholder}')))"
-                )
-                update_set_exprs.append(f"s.{gc['name']} = {grid_expr}")
-
-            case_3_latest_patch_overflow = float(
-                config.get("case3_latest_month_merge_overflow_ratio", config.get("case3_merge_overflow_ratio", 0.10))
-            )
-            case_3_latest_patch_chunks = build_month_chunks_from_df(
-                case_3_latest_month_patch_df,
-                prt,
-                overflow_ratio=case_3_latest_patch_overflow,
-            )
-            logger.info(f"Case III Latest-Month Patch merge chunks: {len(case_3_latest_patch_chunks)}")
-            for idx, months in enumerate(case_3_latest_patch_chunks, 1):
-                case_3_latest_patch_chunk_df = case_3_latest_month_patch_df.filter(F.col(prt).isin(months))
-                case_3_latest_patch_chunk_df = align_for_summary_merge(
-                    spark=spark,
-                    df=case_3_latest_patch_chunk_df,
-                    config=config,
-                    stage=f"summary_merge_case_3_latest_month_patch_chunk_{idx}",
-                )
-                case_3_latest_patch_chunk_df.createOrReplaceTempView("case_3_latest_month_patch_chunk")
-                spark.sql(
-                    f"""
-                        MERGE INTO {summary_table} s
-                        USING case_3_latest_month_patch_chunk c
-                        ON s.{pk} = c.{pk} AND s.{prt} = c.{prt}
-                        WHEN MATCHED AND c.{ts} >= s.{ts}
-                        THEN UPDATE SET {', '.join(update_set_exprs)}
-                    """
-                )
-                logger.info(
-                    f"MERGED - CASE III Latest-Month Patch chunk {idx}/{len(case_3_latest_patch_chunks)} "
-                    f"(months={months})"
-                )
-            process_end_time = time.time()
-            process_total_minutes = (process_end_time - process_start_time) / 60
-            logger.info(
-                f"Updated Summary | MERGED - CASE III Latest-Month Patch | "
-                f"Time Elapsed: {process_total_minutes:.2f} minutes"
-            )
-            logger.info("-" * 60)
 
         process_start_time = time.time()
         if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3_latest_history_context_patch"):
@@ -4107,14 +3908,22 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
         logger.info("UPDATING LATEST SUMMARY FROM CASE III:")
         process_start_time = time.time()
 
-        update_cols = list(dict.fromkeys([prt, ts] + history_cols + grid_cols))
-        case3_select_cols = [pk] + update_cols
+        latest_cols_order = get_latest_cols(config)
+
+        def _select_case3_latest_cols(df):
+            shared = [c for c in latest_cols_order if c in df.columns]
+            if pk not in shared:
+                raise ValueError(f"Primary key '{pk}' missing from Case III latest candidate columns")
+            return df.select(*shared)
 
         case_3b_latest_df = None
         if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3b"):
-            case_3b_latest_df = spark.read.table("execution_catalog.checkpointdb.case_3b").select(*case3_select_cols)
+            case_3b_latest_df = _select_case3_latest_cols(
+                spark.read.table("execution_catalog.checkpointdb.case_3b")
+            )
             case_3b_latest_df = (
                 case_3b_latest_df
+                .withColumn("_source_priority", F.lit(2))
                 .withColumn("_rn", F.row_number().over(Window.partitionBy(pk).orderBy(F.col(prt).desc(), F.col(ts).desc())))
                 .filter(F.col("_rn") == 1)
                 .drop("_rn")
@@ -4122,15 +3931,12 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
 
         case_3a_latest_df = None
         if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3a"):
-            case_3a_latest_df = spark.read.table("execution_catalog.checkpointdb.case_3a").select(*case3_select_cols)
-            if case_3b_latest_df is not None:
-                case_3a_latest_df = case_3a_latest_df.join(
-                    case_3b_latest_df.select(pk).distinct(),
-                    [pk],
-                    "left_anti",
-                )
+            case_3a_latest_df = _select_case3_latest_cols(
+                spark.read.table("execution_catalog.checkpointdb.case_3a")
+            )
             case_3a_latest_df = (
                 case_3a_latest_df
+                .withColumn("_source_priority", F.lit(1))
                 .withColumn("_rn", F.row_number().over(Window.partitionBy(pk).orderBy(F.col(prt).desc(), F.col(ts).desc())))
                 .filter(F.col("_rn") == 1)
                 .drop("_rn")
@@ -4140,39 +3946,109 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
         if case_3b_latest_df is not None:
             case3_latest_df = case_3b_latest_df
         if case_3a_latest_df is not None:
-            case3_latest_df = case_3a_latest_df if case3_latest_df is None else case3_latest_df.unionByName(case_3a_latest_df)
+            case3_latest_df = (
+                case_3a_latest_df
+                if case3_latest_df is None
+                else case3_latest_df.unionByName(case_3a_latest_df, allowMissingColumns=True)
+            )
 
         if case3_latest_df is not None:
             case3_latest_df = (
                 case3_latest_df
-                .withColumn("_rn", F.row_number().over(Window.partitionBy(pk).orderBy(F.col(prt).desc(), F.col(ts).desc())))
+                .withColumn(
+                    "_rn",
+                    F.row_number().over(
+                        Window.partitionBy(pk).orderBy(
+                            F.col(prt).desc(),
+                            F.col(ts).desc(),
+                            F.col("_source_priority").asc(),
+                        )
+                    ),
+                )
                 .filter(F.col("_rn") == 1)
-                .drop("_rn")
+                .drop("_rn", "_source_priority")
             )
-            case3_latest_df.createOrReplaceTempView("latest_case_3")
+            latest_shared_cols = [c for c in latest_cols_order if c in case3_latest_df.columns]
+            if pk not in latest_shared_cols:
+                raise ValueError(f"Primary key '{pk}' missing from Case III latest candidates")
 
-            update_set_exprs = []
-            for col_name in update_cols:
-                if col_name == ts:
-                    update_set_exprs.append(f"s.{col_name} = GREATEST(s.{col_name}, c.{col_name})")
-                elif col_name in history_cols:
-                    update_set_exprs.append(
-                        f"s.{col_name} = {latest_history_preserve_tail_expr(col_name, summary_history_len, latest_history_len)}"
-                    )
-                else:
-                    update_set_exprs.append(f"s.{col_name} = c.{col_name}")
+            scalar_cols = [
+                c for c in latest_shared_cols
+                if c not in set([pk, prt, ts] + history_cols + grid_cols)
+            ]
+            history_update_cols = [c for c in history_cols if c in latest_shared_cols]
+            grid_update_cols = [c for c in grid_cols if c in latest_shared_cols]
 
-            spark.sql(
-                f"""
-                    MERGE INTO {latest_summary_table} s
-                    USING latest_case_3 c
-                    ON s.{pk} = c.{pk}
-                    WHEN MATCHED AND (
-                        s.{prt} < c.{prt}
-                        OR (s.{prt} = c.{prt} AND s.{ts} <= c.{ts})
-                    ) THEN UPDATE SET {', '.join(update_set_exprs)}
-                """
+            case3_latest_state_df = (
+                case3_latest_df.alias("c")
+                .join(
+                    spark.table(latest_summary_table).select(pk, F.col(prt).alias("_existing_prt")).alias("s"),
+                    on=pk,
+                    how="inner",
+                )
+                .withColumn("_is_latest_or_newer", F.col(prt) >= F.col("_existing_prt"))
             )
+            latest_or_newer_df = (
+                case3_latest_state_df
+                .filter(F.col("_is_latest_or_newer"))
+                .select(*latest_shared_cols)
+            )
+            older_df = (
+                case3_latest_state_df
+                .filter(~F.col("_is_latest_or_newer"))
+                .select(*latest_shared_cols)
+            )
+
+            newer_set_exprs: List[str] = []
+            if prt in latest_shared_cols:
+                newer_set_exprs.append(f"s.{prt} = c.{prt}")
+            if ts in latest_shared_cols:
+                newer_set_exprs.append(f"s.{ts} = GREATEST(s.{ts}, c.{ts})")
+            for col_name in scalar_cols:
+                newer_set_exprs.append(f"s.{col_name} = c.{col_name}")
+            for col_name in history_update_cols:
+                newer_set_exprs.append(
+                    f"s.{col_name} = {latest_history_preserve_tail_expr(col_name, summary_history_len, latest_history_len)}"
+                )
+            for col_name in grid_update_cols:
+                newer_set_exprs.append(f"s.{col_name} = c.{col_name}")
+
+            older_set_exprs: List[str] = []
+            if ts in latest_shared_cols:
+                older_set_exprs.append(f"s.{ts} = GREATEST(s.{ts}, c.{ts})")
+            for col_name in history_update_cols:
+                older_set_exprs.append(
+                    f"s.{col_name} = {latest_history_preserve_tail_expr(col_name, summary_history_len, latest_history_len)}"
+                )
+            for col_name in grid_update_cols:
+                older_set_exprs.append(f"s.{col_name} = c.{col_name}")
+
+            if not latest_or_newer_df.isEmpty():
+                latest_or_newer_df.createOrReplaceTempView("latest_case_3_newer_or_same")
+                spark.sql(
+                    f"""
+                        MERGE INTO {latest_summary_table} s
+                        USING latest_case_3_newer_or_same c
+                        ON s.{pk} = c.{pk}
+                        WHEN MATCHED AND (
+                            s.{prt} < c.{prt}
+                            OR (s.{prt} = c.{prt} AND s.{ts} <= c.{ts})
+                        ) THEN UPDATE SET {', '.join(newer_set_exprs)}
+                    """
+                )
+
+            if not older_df.isEmpty():
+                older_df.createOrReplaceTempView("latest_case_3_older")
+                spark.sql(
+                    f"""
+                        MERGE INTO {latest_summary_table} s
+                        USING latest_case_3_older c
+                        ON s.{pk} = c.{pk}
+                        WHEN MATCHED AND c.{ts} >= s.{ts}
+                        THEN UPDATE SET {', '.join(older_set_exprs)}
+                    """
+                )
+
             process_end_time = time.time()
             process_total_minutes = (process_end_time - process_start_time) / 60
             logger.info(f"Updated latest_summary | MERGE - CASE III candidates | Time Elapsed: {process_total_minutes:.2f} minutes")
@@ -4181,69 +4057,6 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
             process_end_time = time.time()
             process_total_minutes = (process_end_time - process_start_time) / 60
             logger.info(f"No Case III candidates for latest_summary | Time Elapsed: {process_total_minutes:.2f} minutes")
-            logger.info("-" * 60)
-
-        process_start_time = time.time()
-        if case_3_latest_month_patch_df is not None:
-            latest_value_cols = [f"latest_val_{rc['name']}" for rc in rolling_columns]
-            latest_cols_set = set(get_latest_cols(config))
-
-            latest_scalar_update_cols = [
-                c for c in case_3_latest_month_patch_df.columns
-                if c in latest_cols_set
-                and c not in set([pk, prt, ts] + history_cols + grid_cols + latest_value_cols)
-            ]
-
-            latest_history_update_sql_map: Dict[str, str] = {}
-            for rc in rolling_columns:
-                array_name = f"{rc['name']}_history"
-                latest_val_col = f"latest_val_{rc['name']}"
-                data_type = rc.get('type', rc.get('data_type', 'String'))
-                latest_history_update_sql_map[array_name] = (
-                    f"transform(sequence(0, {latest_history_len - 1}), i -> CASE "
-                    f"WHEN i = 0 THEN CAST(c.{latest_val_col} AS {data_type.upper()}) "
-                    f"ELSE element_at(s.{array_name}, i + 1) END)"
-                )
-
-            latest_update_set_exprs = [f"s.{ts} = GREATEST(s.{ts}, c.{ts})"]
-            for col_name in latest_scalar_update_cols:
-                latest_update_set_exprs.append(f"s.{col_name} = c.{col_name}")
-            for array_name in history_cols:
-                if array_name in latest_cols_set:
-                    latest_update_set_exprs.append(f"s.{array_name} = {latest_history_update_sql_map[array_name]}")
-
-            for gc in grid_columns:
-                if gc['name'] not in latest_cols_set:
-                    continue
-                source_rolling = gc.get('mapper_rolling_column', gc.get('source_history', ''))
-                source_history = f"{source_rolling}_history"
-                placeholder = gc.get('placeholder', '?').replace("'", "''")
-                separator = gc.get('seperator', gc.get('separator', '')).replace("'", "''")
-                source_expr = latest_history_update_sql_map.get(source_history, f"s.{source_history}")
-                grid_expr = (
-                    f"concat_ws('{separator}', "
-                    f"transform(slice({source_expr}, 1, {summary_history_len}), "
-                    f"x -> coalesce(cast(x as string), '{placeholder}')))"
-                )
-                latest_update_set_exprs.append(f"s.{gc['name']} = {grid_expr}")
-
-            case_3_latest_month_patch_df.createOrReplaceTempView("latest_case_3_latest_month_patch")
-            spark.sql(
-                f"""
-                    MERGE INTO {latest_summary_table} s
-                    USING latest_case_3_latest_month_patch c
-                    ON s.{pk} = c.{pk} AND s.{prt} = c.{prt}
-                    WHEN MATCHED AND c.{ts} >= s.{ts}
-                    THEN UPDATE SET {', '.join(latest_update_set_exprs)}
-                """
-            )
-
-            process_end_time = time.time()
-            process_total_minutes = (process_end_time - process_start_time) / 60
-            logger.info(
-                f"Updated latest_summary | MERGE - CASE III Latest-Month Patch | "
-                f"Time Elapsed: {process_total_minutes:.2f} minutes"
-            )
             logger.info("-" * 60)
 
         # Apply soft-delete future array/grid patches to latest_summary
@@ -4743,8 +4556,6 @@ def cleanup(spark: SparkSession):
         'case_2',
         'case_3a',
         'case_3b',
-        'case_3_latest_month_patch',
-        'case_3_unified_latest_month_patch',
         'case_3_latest_history_context_patch',
         'case_3d_month',
         'case_3d_future',

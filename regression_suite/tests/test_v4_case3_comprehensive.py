@@ -36,7 +36,7 @@ from typing import Dict, List, Optional
 
 from pyspark.sql import functions as F
 
-from tests.v4_contract_utils import load_v4_as_summary_inc, pad_latest_rows
+from tests.v4_contract_utils import DELETE_CODES, HISTORY_COLS, load_v4_as_summary_inc, pad_latest_rows
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +229,17 @@ def _assert_latest_active(spark, table, acct, label):
     )
 
 
+def _snapshot_row_arrays(row) -> Dict[str, tuple]:
+    return {col: tuple((row[col] or [])) for col in HISTORY_COLS}
+
+
+def _fetch_row_arrays(tu, spark, table: str, acct: int, month: str):
+    row = tu.fetch_single_row(spark, table, acct, month)
+    if row is None:
+        return None
+    return _snapshot_row_arrays(row)
+
+
 # ---------------------------------------------------------------------------
 # Module-level state (single shared Spark session across all tests)
 # ---------------------------------------------------------------------------
@@ -294,11 +305,31 @@ def _run_case3(
     module.cleanup(spark)
     tu.reset_tables(spark, config)
 
+    touched_keys = {(int(r["cons_acct_key"]), r["rpt_as_of_mo"]) for r in source_rows}
+    source_row_map = {(int(r["cons_acct_key"]), r["rpt_as_of_mo"]): r for r in source_rows}
+    latest_key_by_acct = {}
+    if latest_rows:
+        for lr in latest_rows:
+            acct = int(lr["cons_acct_key"])
+            mo = lr["rpt_as_of_mo"]
+            if acct not in latest_key_by_acct or mo > latest_key_by_acct[acct]:
+                latest_key_by_acct[acct] = mo
+
     tu.write_summary_rows(spark, config["destination_table"], summary_rows)
 
     if latest_rows is None:
         latest_rows = pad_latest_rows(_latest_row_only(summary_rows))
     tu.write_summary_rows(spark, config["latest_history_table"], latest_rows)
+
+    pre_summary = {}
+    for acct, mo in touched_keys:
+        arr = _fetch_row_arrays(tu, spark, config["destination_table"], acct, mo)
+        if arr is not None:
+            pre_summary[(acct, mo)] = arr
+    pre_latest = {
+        acct: _fetch_row_arrays(tu, spark, config["latest_history_table"], acct, mo)
+        for acct, mo in latest_key_by_acct.items()
+    }
 
     tu.write_source_rows(spark, config["source_table"], source_rows)
 
@@ -341,6 +372,54 @@ def _run_case3(
 
     if normal_count + delete_count > 0:
         module.write_backfill_results(spark, config)
+
+    for acct, mo in touched_keys:
+        summary_row = tu.fetch_single_row(spark, config["destination_table"], acct, mo)
+        _assert_true(summary_row is not None, f"{label}: missing post summary row acct={acct} month={mo}")
+        for col in HISTORY_COLS:
+            _assert_true(len(list(summary_row[col] or [])) == 36, f"{label}: {col} summary len must be 36")
+
+        src = source_row_map[(acct, mo)]
+        if str(src.get("soft_del_cd", "")) not in DELETE_CODES:
+            src_balance = src.get("balance_am")
+            if src_balance is None:
+                src_balance = src.get("current_balance")
+            if src_balance is not None:
+                _assert_true(
+                    int(summary_row["balance_am_history"][0]) == int(src_balance),
+                    f"{label}: acct={acct} month={mo} summary idx0 mismatch",
+                )
+            if (acct, mo) in pre_summary:
+                _assert_true(
+                    _snapshot_row_arrays(summary_row) != pre_summary[(acct, mo)],
+                    f"{label}: expected touched summary arrays to change acct={acct} month={mo}",
+                )
+
+    latest_changed = False
+    for acct, mo in latest_key_by_acct.items():
+        latest_row = tu.fetch_single_row(spark, config["latest_history_table"], acct, mo)
+        _assert_true(latest_row is not None, f"{label}: missing post latest row acct={acct} month={mo}")
+        for col in HISTORY_COLS:
+            _assert_true(len(list(latest_row[col] or [])) == 72, f"{label}: {col} latest len must be 72")
+        before = pre_latest.get(acct)
+        if before is not None and _snapshot_row_arrays(latest_row) != before:
+            latest_changed = True
+
+    # If any source row is within 36 months of account latest or is a soft-delete, latest arrays should change.
+    must_change_latest = False
+    for src in source_rows:
+        acct = int(src["cons_acct_key"])
+        acct_latest = latest_key_by_acct.get(acct)
+        if acct_latest is None:
+            continue
+        if str(src.get("soft_del_cd", "")) in DELETE_CODES:
+            must_change_latest = True
+            break
+        if (_month_to_int(acct_latest) - _month_to_int(src["rpt_as_of_mo"])) <= 36:
+            must_change_latest = True
+            break
+    if must_change_latest and pre_latest:
+        _assert_true(latest_changed, f"{label}: expected at least one touched latest_summary row to change")
 
 
 # ---------------------------------------------------------------------------

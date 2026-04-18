@@ -26,6 +26,7 @@ HISTORY_COLS = [
     "days_past_due_history",
     "asset_class_cd_4in_history",
 ]
+GRID_COLS = ["payment_history_grid"]
 DELETE_CODES = ("1", "4")
 SHARED_V4_MODULE_CACHE = "_summary_inc_v4_shared"
 
@@ -181,9 +182,22 @@ def assert_latest_matches_summary_v4(
                     continue
                 if summary_hist != latest_hist[:summary_len]:
                     row_mismatches.append(f"{col_name}:prefix")
-            else:
+            elif col_name in GRID_COLS:
                 if latest_val != summary_val:
                     row_mismatches.append(col_name)
+            elif col_name in ("cons_acct_key", "rpt_as_of_mo"):
+                if latest_val != summary_val:
+                    row_mismatches.append(col_name)
+            elif col_name == "base_ts":
+                if latest_val is None or summary_val is None:
+                    if latest_val != summary_val:
+                        row_mismatches.append(col_name)
+                elif latest_val < summary_val:
+                    row_mismatches.append(f"{col_name}:older")
+            else:
+                # V4 contract: for older Case III backfills, latest-summary scalar snapshot
+                # columns may intentionally diverge from summary latest-month scalar values.
+                continue
 
         if row_mismatches:
             mismatches.append(

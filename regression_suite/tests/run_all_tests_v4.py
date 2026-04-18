@@ -10,9 +10,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from tests.suite_manifest import build_v4_test_plan, validate_v4_unique_suite
+    from tests.suite_manifest import (
+        TEST_CATEGORY_MAP,
+        get_category_definitions,
+        get_suite_tests,
+        get_tests_by_categories,
+        list_all_categories,
+        validate_category_map,
+        validate_v4_unique_suite,
+    )
 except ModuleNotFoundError:
-    from suite_manifest import build_v4_test_plan, validate_v4_unique_suite
+    from suite_manifest import (
+        TEST_CATEGORY_MAP,
+        get_category_definitions,
+        get_suite_tests,
+        get_tests_by_categories,
+        list_all_categories,
+        validate_category_map,
+        validate_v4_unique_suite,
+    )
 
 
 def _utc_run_id() -> str:
@@ -111,8 +127,39 @@ def _run_audit_runner(tests_dir: Path, audit_dir: Path, logs_dir: Path, tier: st
     }
 
 
+def _parse_categories(raw: str) -> set[str]:
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def _print_categories() -> None:
+    category_defs = get_category_definitions()
+    all_categories = list_all_categories()
+    tests_dir = Path(__file__).resolve().parent
+
+    # Build reverse index for deterministic display.
+    grouped: dict[str, list[str]] = {name: [] for name in all_categories}
+    selected = get_suite_tests(suite="all", tier="nightly")
+    for test_name in selected:
+        for category in sorted(TEST_CATEGORY_MAP.get(test_name, set())):
+            grouped.setdefault(category, []).append(test_name)
+
+    print("Available categories:")
+    for name in all_categories:
+        tests = sorted(set(grouped.get(name, [])))
+        print(f"- {name} ({len(tests)} tests): {category_defs.get(name, '')}")
+        for test_name in tests:
+            print(f"  - {test_name}")
+    print(f"\nManifest source: {tests_dir / 'suite_manifest.py'}")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run V4 unique-coverage suite with tiered selection")
+    parser = argparse.ArgumentParser(description="Run regression suite with suite/tier/category selection")
+    parser.add_argument(
+        "--suite",
+        default="v4",
+        choices=["v4", "core", "all"],
+        help="Test suite selection (default: v4)",
+    )
     parser.add_argument(
         "--tier",
         default="smoke",
@@ -124,9 +171,15 @@ def main() -> None:
     parser.add_argument(
         "--tests",
         default="",
-        help="Comma-separated v4 test files to run (overrides tier manifest)",
+        help="Comma-separated test files to run (hard override over suite/tier/categories)",
     )
-    parser.add_argument("--list", action="store_true", help="Only print test plan and exit")
+    parser.add_argument(
+        "--categories",
+        default="",
+        help="Comma-separated functional categories (OR semantics), intersected with suite/tier selection",
+    )
+    parser.add_argument("--list-categories", action="store_true", help="Print category catalog and exit")
+    parser.add_argument("--list", action="store_true", help="Only print selected test plan and exit")
     args = parser.parse_args()
 
     tests_dir = Path(__file__).resolve().parent
@@ -137,19 +190,56 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     audit_dir.mkdir(parents=True, exist_ok=True)
 
-    validate_v4_unique_suite(tests_dir, tier=args.tier)
-    test_plan = build_v4_test_plan(tier=args.tier)
+    validate_category_map(tests_dir)
+    if args.suite in {"v4", "all"}:
+        validate_v4_unique_suite(tests_dir, tier=args.tier)
 
-    if args.tests.strip():
-        selected = [x.strip() for x in args.tests.split(",") if x.strip()]
-        test_plan = [{"file": test_name, "args": []} for test_name in selected]
+    if args.list_categories:
+        _print_categories()
+        return
+
+    explicit_tests = [x.strip() for x in args.tests.split(",") if x.strip()]
+    selected_categories = _parse_categories(args.categories)
+    known_categories = set(list_all_categories())
+    unknown_categories = sorted(selected_categories - known_categories)
+    if unknown_categories:
+        raise ValueError(
+            "Unknown categories: "
+            f"{unknown_categories}. Valid categories: {sorted(known_categories)}"
+        )
+
+    if explicit_tests:
+        selected_tests = explicit_tests
+    else:
+        selected_tests = get_suite_tests(suite=args.suite, tier=args.tier)
+        if selected_categories:
+            selected_tests = get_tests_by_categories(selected_tests, selected_categories)
+            if not selected_tests:
+                raise ValueError(
+                    "No tests selected after category intersection. "
+                    f"suite={args.suite}, tier={args.tier}, categories={sorted(selected_categories)}"
+                )
+
+    missing_selected = [name for name in selected_tests if not (tests_dir / name).exists()]
+    if missing_selected:
+        raise FileNotFoundError(f"Selected tests not found: {missing_selected}")
+
+    test_plan = [{"file": test_name, "args": []} for test_name in selected_tests]
 
     should_run_audit = (args.tier == "nightly" and not args.skip_audit) or args.audit
     if args.skip_audit:
         should_run_audit = False
+    if should_run_audit and (args.suite != "v4" or selected_categories or explicit_tests):
+        raise ValueError(
+            "Audit runner is only supported for default v4 tier selection "
+            "(no --suite override, no --categories, no --tests override)."
+        )
 
     if args.list:
-        print(f"Planned V4 tests ({args.tier}):")
+        print(
+            "Planned tests "
+            f"(suite={args.suite}, tier={args.tier}, categories={sorted(selected_categories) if selected_categories else 'none'}):"
+        )
         for item in test_plan:
             full = f"{item['file']} {' '.join(item['args'])}".strip()
             print(f"- {full}")
@@ -159,7 +249,10 @@ def main() -> None:
         print(f"audit_root={audit_dir}")
         return
 
-    _print_header(f"V4 SUITE RUN STARTED | tier={args.tier} | run_id={run_id}")
+    _print_header(
+        "REGRESSION SUITE RUN STARTED | "
+        f"suite={args.suite} | tier={args.tier} | categories={sorted(selected_categories) if selected_categories else 'none'} | run_id={run_id}"
+    )
     print(f"log_root={run_dir}")
     print(f"audit_root={audit_dir}")
 
@@ -171,12 +264,14 @@ def main() -> None:
         results.append(_run_audit_runner(tests_dir, audit_dir, run_dir, tier=args.tier))
 
     table = _format_table(results)
-    print("\n=== V4 SUITE SUMMARY ===")
+    print("\n=== REGRESSION SUITE SUMMARY ===")
     print(table)
 
     payload = {
         "run_id": run_id,
+        "suite": args.suite,
         "tier": args.tier,
+        "categories": sorted(selected_categories),
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "log_root": str(run_dir),
         "audit_root": str(audit_dir),
@@ -200,7 +295,7 @@ def main() -> None:
             print(f"- {row['test']} (log: {run_dir / row['log']})")
         sys.exit(1)
 
-    print("\nALL V4 TESTS PASSED")
+    print("\nALL SELECTED TESTS PASSED")
 
 
 if __name__ == "__main__":

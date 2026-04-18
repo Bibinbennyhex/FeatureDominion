@@ -520,17 +520,18 @@ def build_summary_row(
     rating_history: Optional[List[Optional[str]]] = None,
     dpd_history: Optional[List[Optional[int]]] = None,
     asset_history: Optional[List[Optional[str]]] = None,
+    history_len: int = HISTORY_LENGTH,
 ) -> Dict:
     record = {name: None for name, _ in SUMMARY_SCHEMA_SPEC}
     as_of_dt = month_start(rpt_as_of_mo)
 
-    actual_payment_history = payment_history or history({0: actual_payment})
-    balance_am_history = balance_history or history({0: balance})
-    credit_limit_history = credit_history or history({0: credit_limit})
-    past_due_am_history = past_due_history or history({0: past_due})
-    payment_rating_history = rating_history or history({0: payment_rating})
-    days_past_due_history = dpd_history or history({0: days_past_due})
-    asset_class_history = asset_history or history({0: asset_class})
+    actual_payment_history = payment_history or history({0: actual_payment}, length=history_len)
+    balance_am_history = balance_history or history({0: balance}, length=history_len)
+    credit_limit_history = credit_history or history({0: credit_limit}, length=history_len)
+    past_due_am_history = past_due_history or history({0: past_due}, length=history_len)
+    payment_rating_history = rating_history or history({0: payment_rating}, length=history_len)
+    days_past_due_history = dpd_history or history({0: days_past_due}, length=history_len)
+    asset_class_history = asset_history or history({0: asset_class}, length=history_len)
 
     record.update(
         {

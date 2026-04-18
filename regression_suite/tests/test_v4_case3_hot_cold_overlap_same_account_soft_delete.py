@@ -12,6 +12,13 @@ def _assert_true(condition, message):
         raise AssertionError(message)
 
 
+def _snapshot_row_arrays(tu, spark, table, acct, month):
+    row = tu.fetch_single_row(spark, table, acct, month)
+    if row is None:
+        return None
+    return {col: tuple((row[col] or [])) for col in HISTORY_COLS}
+
+
 def test_v4_case3_hot_cold_overlap_same_account_soft_delete():
     repo_root = Path(__file__).resolve().parents[2]
     module = load_v4_as_summary_inc("_summary_inc_v4_case3_hot_cold_overlap_same_account_soft_delete")
@@ -63,6 +70,8 @@ def test_v4_case3_hot_cold_overlap_same_account_soft_delete():
             ]
             tu.write_summary_rows(spark, config["destination_table"], existing_rows)
             tu.write_summary_rows(spark, config["latest_history_table"], pad_latest_rows([existing_rows[-1]]))
+            pre_summary_202601 = _snapshot_row_arrays(tu, spark, config["destination_table"], acct, "2026-01")
+            pre_latest_202601 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], acct, "2026-01")
 
             # Same account has both hot and cold soft-delete rows.
             source_rows = [
@@ -90,8 +99,8 @@ def test_v4_case3_hot_cold_overlap_same_account_soft_delete():
             ).first()
             hot_count = int(split_counts["hot_count"] or 0)
             cold_count = int(split_counts["cold_count"] or 0)
-            _assert_true(hot_count == 2, f"Expected 2 hot rows, got {hot_count}")
-            _assert_true(cold_count == 2, f"Expected 2 cold rows, got {cold_count}")
+            _assert_true(hot_count == 3, f"Expected 3 hot rows, got {hot_count}")
+            _assert_true(cold_count == 1, f"Expected 1 cold row, got {cold_count}")
 
             module.run_pipeline(spark, config)
 
@@ -101,6 +110,10 @@ def test_v4_case3_hot_cold_overlap_same_account_soft_delete():
 
             future_summary = tu.fetch_single_row(spark, config["destination_table"], acct, "2026-01")
             future_latest = tu.fetch_single_row(spark, config["latest_history_table"], acct, "2026-01")
+            post_summary_202601 = _snapshot_row_arrays(tu, spark, config["destination_table"], acct, "2026-01")
+            post_latest_202601 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], acct, "2026-01")
+            _assert_true(pre_summary_202601 != post_summary_202601, "Summary arrays should change for 2026-01")
+            _assert_true(pre_latest_202601 != post_latest_202601, "Latest arrays should change for 2026-01")
             expected_null_indexes = [1, 2]
 
             for col_name in HISTORY_COLS:

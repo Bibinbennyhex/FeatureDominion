@@ -13,5 +13,7 @@ docker compose -f docker/docker-compose.yml exec -T spark-iceberg-main python3 '
 
 
 
+docker compose -f docker/docker-compose.yml exec -T spark-iceberg-main python3 '/workspace/Feature _Deployment/regression_suite/tests/run_all_tests_v4.py' --list-categories
 
 
+docker compose -f docker/docker-compose.yml exec -T spark-iceberg-main sh -lc "cd '/workspace/Feature _Deployment' && python3 regression_suite/tests/run_all_tests_v4.py --suite all --tier nightly --skip-audit

@@ -4,12 +4,19 @@ import sys
 
 from pyspark.sql import functions as F
 
-from tests.v4_contract_utils import load_v4_as_summary_inc, pad_latest_rows
+from tests.v4_contract_utils import HISTORY_COLS, load_v4_as_summary_inc, pad_latest_rows
 
 
 def _assert_true(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def _snapshot_row_arrays(tu, spark, table, acct, month):
+    row = tu.fetch_single_row(spark, table, acct, month)
+    if row is None:
+        return None
+    return {col: tuple((row[col] or [])) for col in HISTORY_COLS}
 
 
 def test_v4_case3_soft_delete_hot_cold_split():
@@ -68,6 +75,8 @@ def test_v4_case3_soft_delete_hot_cold_split():
             config["latest_history_table"],
             pad_latest_rows([existing_rows[-1]]),
         )
+        pre_summary_202601 = _snapshot_row_arrays(tu, spark, config["destination_table"], acct, "2026-01")
+        pre_latest_202601 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], acct, "2026-01")
 
         # Multiple soft-deletes for the same account:
         # hot: 2025-12, 2025-11, 2025-10
@@ -115,17 +124,12 @@ def test_v4_case3_soft_delete_hot_cold_split():
         # Future month patch check (2026-01) for hot deletes: positions 1,2,3 nulled in summary.
         future_summary_row = tu.fetch_single_row(spark, config["destination_table"], acct, "2026-01")
         future_latest_row = tu.fetch_single_row(spark, config["latest_history_table"], acct, "2026-01")
+        post_summary_202601 = _snapshot_row_arrays(tu, spark, config["destination_table"], acct, "2026-01")
+        post_latest_202601 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], acct, "2026-01")
+        _assert_true(pre_summary_202601 != post_summary_202601, "Summary arrays should change for 2026-01")
+        _assert_true(pre_latest_202601 != post_latest_202601, "Latest arrays should change for 2026-01")
 
-        history_cols = [
-            "actual_payment_am_history",
-            "balance_am_history",
-            "credit_limit_am_history",
-            "past_due_am_history",
-            "payment_rating_cd_history",
-            "days_past_due_history",
-            "asset_class_cd_4in_history",
-        ]
-        for col_name in history_cols:
+        for col_name in HISTORY_COLS:
             summary_hist = list(future_summary_row[col_name] or [])
             latest_hist = list(future_latest_row[col_name] or [])
             _assert_true(len(summary_hist) == 36, f"{col_name} summary length expected 36, got {len(summary_hist)}")

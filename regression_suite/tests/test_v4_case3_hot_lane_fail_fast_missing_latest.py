@@ -46,14 +46,17 @@ def test_v4_case3_hot_lane_fail_fast_missing_latest():
         tu.write_source_rows(
             spark,
             config["source_table"],
-            [tu.build_source_row(acct, "2025-12", source_ts, balance=5300, actual_payment=530)],
+            [tu.build_source_row(acct, "2026-01", source_ts, balance=5300, actual_payment=530)],
         )
 
         module.ensure_soft_delete_columns(spark, config)
         module.preload_run_table_columns(spark, config)
         classified = module.load_and_classify_accounts(spark, config)
-        case_iii_df = classified.filter((F.col("case_type") == "CASE_III") & (~F.col("_is_soft_delete")))
-        _assert_true(case_iii_df.count() == 1, "Expected 1 hot CASE_III row")
+        case_iii_df = classified.filter((F.col("case_type") == "CASE_III") & (~F.col("_is_soft_delete"))).cache()
+        case_iii_rows = case_iii_df.collect()
+        case_iii_count = len(case_iii_rows)
+        _assert_true(case_iii_count == 1, "Expected 1 hot CASE_III row")
+        case_iii_df = spark.createDataFrame(case_iii_rows, schema=case_iii_df.schema)
 
         spark.sql(f"DELETE FROM {config['latest_history_table']} WHERE cons_acct_key = {acct}")
 

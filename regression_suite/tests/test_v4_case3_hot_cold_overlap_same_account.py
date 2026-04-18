@@ -4,12 +4,19 @@ import sys
 
 from pyspark.sql import functions as F
 
-from tests.v4_contract_utils import load_v4_as_summary_inc, pad_latest_rows
+from tests.v4_contract_utils import HISTORY_COLS, load_v4_as_summary_inc, pad_latest_rows
 
 
 def _assert_true(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def _snapshot_row_arrays(tu, spark, table, acct, month):
+    row = tu.fetch_single_row(spark, table, acct, month)
+    if row is None:
+        return None
+    return {col: tuple((row[col] or [])) for col in HISTORY_COLS}
 
 
 def test_v4_case3_hot_cold_overlap_same_account():
@@ -53,6 +60,8 @@ def test_v4_case3_hot_cold_overlap_same_account():
             config["latest_history_table"],
             pad_latest_rows([existing_rows[-1]]),
         )
+        pre_summary_202601 = _snapshot_row_arrays(tu, spark, config["destination_table"], acct, "2026-01")
+        pre_latest_202601 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], acct, "2026-01")
 
         # Same account with both hot and cold Case III updates.
         source_rows = [
@@ -96,6 +105,19 @@ def test_v4_case3_hot_cold_overlap_same_account():
             row = tu.fetch_single_row(spark, config["destination_table"], acct, mo)
             _assert_true(int(row["balance_am"]) == bal, f"{mo} expected balance {bal}, got {row['balance_am']}")
             _assert_true(row["base_ts"] == source_ts, f"{mo} expected base_ts {source_ts}, got {row['base_ts']}")
+
+        post_summary_202601 = _snapshot_row_arrays(tu, spark, config["destination_table"], acct, "2026-01")
+        post_latest_202601 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], acct, "2026-01")
+        _assert_true(pre_summary_202601 != post_summary_202601, "Summary arrays should change for overlap account")
+        _assert_true(pre_latest_202601 != post_latest_202601, "Latest arrays should change for overlap account")
+        _assert_true(
+            post_summary_202601["balance_am_history"][1] == 9300,
+            "2026-01 summary idx1 should contain 2025-12 overwrite",
+        )
+        _assert_true(
+            post_summary_202601["balance_am_history"][2] == 9200,
+            "2026-01 summary idx2 should contain 2025-11 overwrite",
+        )
 
         print(
             "[PASS] v4 Case III hot/cold overlap (same account) verified "

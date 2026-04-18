@@ -4,12 +4,19 @@ import sys
 
 from pyspark.sql import functions as F
 
-from tests.v4_contract_utils import load_v4_as_summary_inc, pad_latest_rows
+from tests.v4_contract_utils import HISTORY_COLS, load_v4_as_summary_inc, pad_latest_rows
 
 
 def _assert_true(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def _snapshot_row_arrays(tu, spark, table, acct, month):
+    row = tu.fetch_single_row(spark, table, acct, month)
+    if row is None:
+        return None
+    return {col: tuple((row[col] or [])) for col in HISTORY_COLS}
 
 
 def test_v4_case3_hot_and_cold_split():
@@ -72,6 +79,19 @@ def test_v4_case3_hot_and_cold_split():
         tu.write_summary_rows(spark, config["destination_table"], existing_rows)
         tu.write_summary_rows(spark, config["latest_history_table"], pad_latest_rows(existing_rows))
 
+        pre_summary_untouched = _snapshot_row_arrays(
+            tu, spark, config["destination_table"], 9999, "2020-01"
+        )
+        pre_latest_untouched = _snapshot_row_arrays(
+            tu, spark, config["latest_history_table"], 9999, "2020-01"
+        )
+        pre_latest_9001 = _snapshot_row_arrays(
+            tu, spark, config["latest_history_table"], 9001, "2026-01"
+        )
+        pre_latest_9003 = _snapshot_row_arrays(
+            tu, spark, config["latest_history_table"], 9003, "2026-01"
+        )
+
         # Case III input:
         # - 9001 @ 2025-12 => HOT (diff=1)
         # - 9003 @ 2023-01 => HOT boundary (diff=36, inclusive)
@@ -112,8 +132,44 @@ def test_v4_case3_hot_and_cold_split():
         boundary_row = split_df.filter(F.col("cons_acct_key") == F.lit(9003)).select("case3_month_diff").first()
         _assert_true(int(boundary_row["case3_month_diff"]) == 36, "Boundary row should be diff=36")
 
-        # Execute Case III to ensure both lanes are processable end-to-end.
-        module.process_case_iii(spark, case_iii_df, config, expected_rows=3)
+        module.run_pipeline(spark, config)
+
+        post_summary_untouched = _snapshot_row_arrays(
+            tu, spark, config["destination_table"], 9999, "2020-01"
+        )
+        post_latest_untouched = _snapshot_row_arrays(
+            tu, spark, config["latest_history_table"], 9999, "2020-01"
+        )
+        _assert_true(
+            post_summary_untouched == pre_summary_untouched,
+            "Untouched summary key changed unexpectedly for acct=9999 month=2020-01",
+        )
+        _assert_true(
+            post_latest_untouched == pre_latest_untouched,
+            "Untouched latest_summary key changed unexpectedly for acct=9999 month=2020-01",
+        )
+
+        hot_summary_9001 = tu.fetch_single_row(spark, config["destination_table"], 9001, "2025-12")
+        hot_summary_9003 = tu.fetch_single_row(spark, config["destination_table"], 9003, "2023-01")
+        _assert_true(int(hot_summary_9001["balance_am_history"][0]) == 5100, "acct=9001 summary idx0 mismatch")
+        _assert_true(int(hot_summary_9003["balance_am_history"][0]) == 8100, "acct=9003 summary idx0 mismatch")
+
+        post_latest_9001 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], 9001, "2026-01")
+        post_latest_9003 = _snapshot_row_arrays(tu, spark, config["latest_history_table"], 9003, "2026-01")
+        _assert_true(pre_latest_9001 is not None and post_latest_9001 is not None, "Missing latest row for acct=9001")
+        _assert_true(pre_latest_9003 is not None and post_latest_9003 is not None, "Missing latest row for acct=9003")
+        _assert_true(
+            post_latest_9001["balance_am_history"][1] == 5100,
+            "acct=9001 latest_summary balance history idx1 should be 5100",
+        )
+        _assert_true(
+            post_latest_9003["balance_am_history"][36] == 8100,
+            "acct=9003 latest_summary balance history idx36 should be 8100",
+        )
+        _assert_true(
+            pre_latest_9001 != post_latest_9001 and pre_latest_9003 != post_latest_9003,
+            "Expected touched latest_summary rows to change",
+        )
 
         print(
             "[PASS] v4 hot/cold split verified "

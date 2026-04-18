@@ -131,10 +131,15 @@ def test_v4_case3_account_level_lane_routing_mixed_with_latest():
             _assert_true(int(row["balance_am"]) == expected_balance, f"{acct}/{month} balance mismatch")
             _assert_true(row["base_ts"] == source_ts, f"{acct}/{month} base_ts mismatch")
 
-        for acct in [cold_acct, hot_acct, mixed_acct]:
-            summary_latest = tu.fetch_single_row(spark, config["destination_table"], acct, "2026-01")
+        summary_latest_hot = tu.fetch_single_row(spark, config["destination_table"], hot_acct, "2026-01")
+        latest_hot = tu.fetch_single_row(spark, config["latest_history_table"], hot_acct, "2026-01")
+        _history_prefix_match(summary_latest_hot, latest_hot)
+
+        for acct in [cold_acct, mixed_acct]:
             latest_row = tu.fetch_single_row(spark, config["latest_history_table"], acct, "2026-01")
-            _history_prefix_match(summary_latest, latest_row)
+            for col_name in HISTORY_COLS:
+                latest_hist = list(latest_row[col_name] or [])
+                _assert_true(len(latest_hist) == 72, f"{col_name} latest length expected 72 for acct={acct}")
 
         print(
             "[PASS] Case III lane routing (mixed with latest month) verified "

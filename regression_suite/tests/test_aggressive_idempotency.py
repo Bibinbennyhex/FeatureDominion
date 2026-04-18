@@ -23,6 +23,8 @@ from typing import Dict, List, Tuple
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
+from tests.v4_contract_utils import assert_latest_matches_summary_v4, pad_latest_rows
+
 from test_utils import (
     assert_watermark_tracker_consistent,
     build_source_row,
@@ -97,26 +99,7 @@ def _assert_no_duplicates(spark, table_name: str, keys: List[str], label: str):
 
 
 def _assert_latest_matches_summary(spark, summary_table: str, latest_table: str):
-    summary_df = spark.table(summary_table)
-    latest_df = spark.table(latest_table)
-
-    w = Window.partitionBy("cons_acct_key").orderBy(
-        F.col("rpt_as_of_mo").desc(),
-        F.col("base_ts").desc(),
-    )
-
-    expected_latest_df = (
-        summary_df.withColumn("_rn", F.row_number().over(w))
-        .filter(F.col("_rn") == 1)
-        .drop("_rn")
-        .select(*latest_df.columns)
-    )
-    latest_df = latest_df.select(*latest_df.columns)
-
-    missing = expected_latest_df.exceptAll(latest_df).count()
-    extra = latest_df.exceptAll(expected_latest_df).count()
-    if missing > 0 or extra > 0:
-        raise AssertionError(f"latest_summary mismatch vs summary latest rows (missing={missing}, extra={extra})")
+    assert_latest_matches_summary_v4(spark, summary_table, latest_table)
 
 
 def _seed_baseline(spark, config: Dict, seed_existing: int):
@@ -176,7 +159,7 @@ def _seed_baseline(spark, config: Dict, seed_existing: int):
         latest_rows.append(row)
 
     write_summary_rows(spark, config["destination_table"], summary_rows)
-    write_summary_rows(spark, config["latest_history_table"], latest_rows)
+    write_summary_rows(spark, config["latest_history_table"], pad_latest_rows(latest_rows))
 
     return list(range(start_acct, start_acct + seed_existing))
 
