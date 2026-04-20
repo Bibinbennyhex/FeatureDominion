@@ -4193,32 +4193,60 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
                         THEN UPDATE SET {', '.join(older_set_exprs)}
                     """
                 )
-                # Older Case III candidates can modify months in the 36..71 tail.
-                # Rebuild full latest history arrays from summary for these accounts.
-                older_account_keys = older_df.select(pk).distinct()
-                older_history_patch_df = build_latest_history_patch_from_summary(
+
+            # Cold-touched Case III accounts (latest_month_int - backfill_month_int > 36)
+            # require a full 72-tail rebuild from summary, while hot-only accounts keep current behavior.
+            cold_touched_accounts = None
+            if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3a"):
+                case3_backfill_months = (
+                    spark.read.table("execution_catalog.checkpointdb.case_3a")
+                    .select(pk, prt)
+                    .dropDuplicates([pk, prt])
+                    .withColumn("month_int", F.expr(month_to_int_expr(prt)))
+                )
+                latest_months = (
+                    spark.table(latest_summary_table)
+                    .select(pk, F.col(prt).alias("_latest_prt"))
+                    .withColumn("latest_month_int", F.expr(month_to_int_expr("_latest_prt")))
+                )
+                cold_touched_accounts = (
+                    case3_backfill_months.alias("c")
+                    .join(latest_months.alias("l"), on=pk, how="inner")
+                    .filter((F.col("l.latest_month_int") - F.col("c.month_int")) > F.lit(summary_history_len))
+                    .select(F.col(pk))
+                    .distinct()
+                )
+
+            if cold_touched_accounts is not None and (not cold_touched_accounts.isEmpty()):
+                cold_touched_count = int(cold_touched_accounts.count() or 0)
+                logger.info(
+                    f"Case III cold-tail rebuild accounts detected: {cold_touched_count} "
+                    f"(threshold_diff>{summary_history_len})"
+                )
+
+                cold_history_patch_df = build_latest_history_patch_from_summary(
                     spark=spark,
                     config=config,
-                    account_keys_df=older_account_keys,
+                    account_keys_df=cold_touched_accounts,
                 )
-                if older_history_patch_df is not None and (not older_history_patch_df.isEmpty()):
-                    older_history_patch_df = align_history_arrays_to_length(
-                        older_history_patch_df,
+                if cold_history_patch_df is not None and (not cold_history_patch_df.isEmpty()):
+                    cold_history_patch_df = align_history_arrays_to_length(
+                        cold_history_patch_df,
                         rolling_columns,
                         latest_history_len,
                     )
-                    patch_cols = [c for c in ([ts] + history_cols + grid_cols) if c in older_history_patch_df.columns]
+                    patch_cols = [c for c in ([ts] + history_cols + grid_cols) if c in cold_history_patch_df.columns]
                     patch_set_exprs = []
                     for col_name in patch_cols:
                         if col_name == ts:
                             patch_set_exprs.append(f"s.{col_name} = GREATEST(s.{col_name}, c.{col_name})")
                         else:
                             patch_set_exprs.append(f"s.{col_name} = c.{col_name}")
-                    older_history_patch_df.select(pk, *patch_cols).createOrReplaceTempView("latest_case_3_older_history_patch")
+                    cold_history_patch_df.select(pk, *patch_cols).createOrReplaceTempView("latest_case_3_cold_tail_history_patch")
                     spark.sql(
                         f"""
                             MERGE INTO {latest_summary_table} s
-                            USING latest_case_3_older_history_patch c
+                            USING latest_case_3_cold_tail_history_patch c
                             ON s.{pk} = c.{pk}
                             WHEN MATCHED THEN UPDATE SET {', '.join(patch_set_exprs)}
                         """
