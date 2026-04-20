@@ -2806,6 +2806,7 @@ def process_case_iii_soft_delete_using_latest_history_context(
         delete_existing
         .groupBy(pk)
         .agg(
+            F.collect_set("delete_month_int").alias("delete_month_ints"),
             F.min("delete_month_int").alias("min_delete_month_int"),
             F.max(F.col(ts)).alias("max_delete_ts"),
         )
@@ -2826,7 +2827,8 @@ def process_case_iii_soft_delete_using_latest_history_context(
                     transform(
                         sequence(0, {latest_history_len - 1}),
                         i -> CASE
-                            WHEN (latest_month_int - i) >= min_delete_month_int THEN CAST(NULL AS {dtype})
+                            WHEN array_contains(delete_month_ints, CAST(latest_month_int - i AS INT))
+                            THEN CAST(NULL AS {dtype})
                             ELSE element_at({history_col}, i + 1)
                         END
                     ) AS {history_col}
@@ -3195,6 +3197,7 @@ def process_case_iii_soft_delete(
             .withColumn("delete_month_int", F.expr(month_to_int_expr(prt)))
             .groupBy(pk)
             .agg(
+                F.collect_set("delete_month_int").alias("delete_month_ints"),
                 F.min("delete_month_int").alias("min_delete_month_int"),
                 F.max(F.col(ts)).alias("max_delete_ts"),
             )
@@ -3218,7 +3221,8 @@ def process_case_iii_soft_delete(
                         transform(
                             sequence(0, {latest_history_len - 1}),
                             i -> CASE
-                                WHEN (latest_month_int - i) >= min_delete_month_int THEN CAST(NULL AS {dtype})
+                                WHEN array_contains(delete_month_ints, CAST(latest_month_int - i AS INT))
+                                THEN CAST(NULL AS {dtype})
                                 ELSE element_at({history_col}, i + 1)
                             END
                         ) AS {history_col}
@@ -3475,6 +3479,147 @@ def build_latest_merge_columns(
     update_cols = [c for c in shared_cols if c != pk]
     update_set_expr = ", ".join([f"s.{c} = c.{c}" for c in update_cols])
     return shared_cols, update_set_expr
+
+
+def build_latest_history_patch_from_summary(
+    spark: SparkSession,
+    config: Dict[str, Any],
+    account_keys_df,
+):
+    """
+    Rebuild full latest_summary history arrays (72) from summary month rows for specific accounts.
+
+    Deleted summary months are treated as NULL contributors to history arrays.
+    """
+    if account_keys_df is None or account_keys_df.isEmpty():
+        return None
+
+    pk = config["primary_column"]
+    prt = config["partition_column"]
+    ts = config["max_identifier_column"]
+    summary_table = config["destination_table"]
+    latest_summary_table = config["latest_history_table"]
+    summary_history_len = get_summary_history_len(config)
+    latest_history_len = get_latest_history_len(config)
+    rolling_columns = config.get("rolling_columns", [])
+    grid_columns = config.get("grid_columns", [])
+
+    account_keys_df = account_keys_df.select(pk).distinct()
+    mapper_cols = [rc["mapper_column"] for rc in rolling_columns]
+
+    latest_scope = (
+        spark.table(latest_summary_table)
+        .select(
+            F.col(pk),
+            F.col(prt).alias("latest_rpt_as_of_mo"),
+            F.col(ts).alias("latest_base_ts"),
+        )
+        .join(account_keys_df, on=pk, how="inner")
+        .withColumn("latest_month_int", F.expr(month_to_int_expr("latest_rpt_as_of_mo")))
+    )
+
+    if latest_scope.isEmpty():
+        return None
+
+    summary_scoped = (
+        spark.table(summary_table)
+        .select(pk, prt, ts, SOFT_DELETE_COLUMN, *mapper_cols)
+        .withColumn("month_int", F.expr(month_to_int_expr(prt)))
+        .join(
+            latest_scope.select(pk, "latest_month_int", "latest_rpt_as_of_mo", "latest_base_ts"),
+            on=pk,
+            how="inner",
+        )
+        .filter(
+            (F.col("month_int") <= F.col("latest_month_int"))
+            & (F.col("month_int") >= F.col("latest_month_int") - F.lit(latest_history_len - 1))
+        )
+    )
+
+    # Keep only the latest row per account-month before map aggregation.
+    month_window = Window.partitionBy(pk, "month_int").orderBy(F.col(ts).desc())
+    summary_scoped = (
+        summary_scoped
+        .withColumn("_rn", F.row_number().over(month_window))
+        .filter(F.col("_rn") == 1)
+        .drop("_rn")
+    )
+
+    for rc in rolling_columns:
+        mapper_col = rc["mapper_column"]
+        summary_scoped = summary_scoped.withColumn(
+            f"_hist_src_{mapper_col}",
+            F.when(
+                F.coalesce(F.col(SOFT_DELETE_COLUMN), F.lit("")).isin(*SOFT_DELETE_CODES),
+                F.lit(None),
+            ).otherwise(F.col(mapper_col)),
+        )
+
+    agg_exprs = [F.max(F.col(ts)).alias("summary_max_ts")]
+    for rc in rolling_columns:
+        mapper_col = rc["mapper_column"]
+        agg_exprs.append(
+            F.map_from_entries(
+                F.collect_list(
+                    F.struct(F.col("month_int"), F.col(f"_hist_src_{mapper_col}"))
+                )
+            ).alias(f"_hist_map_{rc['name']}")
+        )
+
+    history_maps = (
+        summary_scoped
+        .groupBy(pk, "latest_rpt_as_of_mo", "latest_base_ts", "latest_month_int")
+        .agg(*agg_exprs)
+    )
+
+    if history_maps.isEmpty():
+        return None
+
+    patch_df = history_maps.select(
+        F.col(pk),
+        F.col("latest_rpt_as_of_mo").alias(prt),
+        F.greatest(F.col("latest_base_ts"), F.col("summary_max_ts")).alias(ts),
+        F.col("latest_month_int"),
+        *[F.col(f"_hist_map_{rc['name']}") for rc in rolling_columns],
+    )
+
+    for rc in rolling_columns:
+        history_col = f"{rc['name']}_history"
+        dtype = rc.get("type", rc.get("data_type", "String")).upper()
+        patch_df = patch_df.withColumn(
+            history_col,
+            F.expr(
+                f"""
+                transform(
+                    sequence(0, {latest_history_len - 1}),
+                    i -> CAST(
+                        element_at(_hist_map_{rc['name']}, CAST(latest_month_int - i AS INT))
+                        AS {dtype}
+                    )
+                )
+                """
+            ),
+        )
+
+    for gc in grid_columns:
+        source_rolling = gc.get("mapper_rolling_column", gc.get("source_history", ""))
+        source_history = f"{source_rolling}_history"
+        placeholder = gc.get("placeholder", "?")
+        separator = gc.get("seperator", gc.get("separator", ""))
+        patch_df = patch_df.withColumn(
+            gc["name"],
+            F.concat_ws(
+                separator,
+                F.transform(
+                    F.slice(F.col(source_history), 1, summary_history_len),
+                    lambda x: F.coalesce(x.cast(StringType()), F.lit(placeholder)),
+                ),
+            ),
+        )
+
+    keep_cols = [pk, prt, ts] + [f"{rc['name']}_history" for rc in rolling_columns] + [gc["name"] for gc in grid_columns]
+    keep_cols = [c for c in keep_cols if c in patch_df.columns]
+    return patch_df.select(*keep_cols)
 
 
 def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected_rows_append: Optional[int] = None):
@@ -4048,6 +4193,36 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
                         THEN UPDATE SET {', '.join(older_set_exprs)}
                     """
                 )
+                # Older Case III candidates can modify months in the 36..71 tail.
+                # Rebuild full latest history arrays from summary for these accounts.
+                older_account_keys = older_df.select(pk).distinct()
+                older_history_patch_df = build_latest_history_patch_from_summary(
+                    spark=spark,
+                    config=config,
+                    account_keys_df=older_account_keys,
+                )
+                if older_history_patch_df is not None and (not older_history_patch_df.isEmpty()):
+                    older_history_patch_df = align_history_arrays_to_length(
+                        older_history_patch_df,
+                        rolling_columns,
+                        latest_history_len,
+                    )
+                    patch_cols = [c for c in ([ts] + history_cols + grid_cols) if c in older_history_patch_df.columns]
+                    patch_set_exprs = []
+                    for col_name in patch_cols:
+                        if col_name == ts:
+                            patch_set_exprs.append(f"s.{col_name} = GREATEST(s.{col_name}, c.{col_name})")
+                        else:
+                            patch_set_exprs.append(f"s.{col_name} = c.{col_name}")
+                    older_history_patch_df.select(pk, *patch_cols).createOrReplaceTempView("latest_case_3_older_history_patch")
+                    spark.sql(
+                        f"""
+                            MERGE INTO {latest_summary_table} s
+                            USING latest_case_3_older_history_patch c
+                            ON s.{pk} = c.{pk}
+                            WHEN MATCHED THEN UPDATE SET {', '.join(patch_set_exprs)}
+                        """
+                    )
 
             process_end_time = time.time()
             process_total_minutes = (process_end_time - process_start_time) / 60
