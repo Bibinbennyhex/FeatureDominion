@@ -4196,14 +4196,43 @@ def write_backfill_results(spark: SparkSession, config: Dict[str, Any], expected
 
             # Cold-touched Case III accounts (latest_month_int - backfill_month_int > 36)
             # require a full 72-tail rebuild from summary, while hot-only accounts keep current behavior.
-            cold_touched_accounts = None
+            case3_sources = []
+            case3a_month_count = 0
+            case3b_month_count = 0
+
             if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3a"):
-                case3_backfill_months = (
+                case3a_months = (
                     spark.read.table("execution_catalog.checkpointdb.case_3a")
                     .select(pk, prt)
                     .dropDuplicates([pk, prt])
                     .withColumn("month_int", F.expr(month_to_int_expr(prt)))
                 )
+                case3a_month_count = int(case3a_months.count() or 0)
+                case3_sources.append(case3a_months)
+
+            if spark.catalog.tableExists("execution_catalog.checkpointdb.case_3b"):
+                case3b_months = (
+                    spark.read.table("execution_catalog.checkpointdb.case_3b")
+                    .select(pk, prt)
+                    .dropDuplicates([pk, prt])
+                    .withColumn("month_int", F.expr(month_to_int_expr(prt)))
+                )
+                case3b_month_count = int(case3b_months.count() or 0)
+                case3_sources.append(case3b_months)
+
+            cold_touched_accounts = None
+            if case3_sources:
+                case3_backfill_months = case3_sources[0]
+                for df in case3_sources[1:]:
+                    case3_backfill_months = case3_backfill_months.unionByName(df, allowMissingColumns=True)
+                case3_backfill_months = case3_backfill_months.dropDuplicates([pk, prt])
+
+                logger.info(
+                    f"Case III cold-tail source month counts | "
+                    f"case_3a={case3a_month_count}, case_3b={case3b_month_count}, "
+                    f"union={int(case3_backfill_months.count() or 0)}"
+                )
+
                 latest_months = (
                     spark.table(latest_summary_table)
                     .select(pk, F.col(prt).alias("_latest_prt"))
